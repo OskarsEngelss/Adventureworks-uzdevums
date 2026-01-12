@@ -59,7 +59,6 @@ def adventureworks_dag():
         conn = hook.get_conn()
         cur = conn.cursor()
 
-        # Gets all tables
         cur.execute("""
             SELECT table_schema, table_name
             FROM information_schema.tables
@@ -71,7 +70,6 @@ def adventureworks_dag():
 
         results = []
         for schema, table in tables:
-            # Gets column names
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -80,7 +78,6 @@ def adventureworks_dag():
             """, (schema, table))
             columns = [row[0] for row in cur.fetchall()]
 
-            # Determines if a table if a fact or dim
             table_type = classify_table(table, columns)
 
             results.append({
@@ -95,8 +92,10 @@ def adventureworks_dag():
 
     @task
     def extract_incremental_data(tables):
-        """Extract data from Postgres based on table type."""
-        hook = PostgresHook(postgres_conn_id="postgres_source")
+        """Extract data from Postgres source and write staging tables into the SAME Postgres DB."""
+        pg = PostgresHook(postgres_conn_id="postgres_source")
+        engine = pg.get_sqlalchemy_engine()
+
         extracted = {}
 
         for t in tables:
@@ -105,16 +104,14 @@ def adventureworks_dag():
             table_type = t["type"]
             columns = t["columns"]
 
-            df = None  # Always define df
+            df = None
 
-            # Always extract person.* tables
             if schema == "person":
-                df = hook.get_pandas_df(sql=f"SELECT * FROM {schema}.{table}")
+                df = pg.get_pandas_df(sql=f"SELECT * FROM {schema}.{table}")
 
-            # Dimension tables with ModifiedDate
             elif table_type == "dimension":
                 if "modifieddate" in [c.lower() for c in columns]:
-                    df = hook.get_pandas_df(sql=f"""
+                    df = pg.get_pandas_df(sql=f"""
                         SELECT *
                         FROM {schema}.{table}
                         WHERE modifieddate > '2000-01-01'
@@ -122,13 +119,12 @@ def adventureworks_dag():
                 else:
                     continue
 
-            # Fact tables with date columns
             else:
                 date_cols = [c for c in columns if "date" in c.lower()]
                 if not date_cols:
                     continue
                 date_col = date_cols[0]
-                df = hook.get_pandas_df(sql=f"""
+                df = pg.get_pandas_df(sql=f"""
                     SELECT *
                     FROM {schema}.{table}
                     WHERE {date_col} BETWEEN '2012-01-01' AND '2014-12-31'
@@ -137,87 +133,106 @@ def adventureworks_dag():
             if df is None:
                 continue
 
-            # Normalize object columns
             for col in df.columns:
                 if df[col].dtype == "object":
                     df[col] = df[col].astype(str)
 
+            staging_table = f"staging_{schema}_{table}"
+
+            df.to_sql(
+                staging_table,
+                engine,
+                if_exists="replace",
+                index=False
+            )
+
             extracted[f"{schema}.{table}"] = {
-                "df": df,
+                "staging_table": staging_table,
                 "columns": columns,
                 "type": table_type
             }
 
+            print(f"\n=== Loaded {schema}.{table} into {staging_table} ===")
+            print(df.head(5).to_string())
+            print(f"Rows loaded: {len(df)}\n")
+
         return extracted
+
+
+
+
+
 
 
     @task
     def validate_extracted_data(extracted_data: dict):
-        """Run basic data quality checks."""
-        hook = PostgresHook(postgres_conn_id="postgres_source")
-        conn = hook.get_conn()
+        """Validate data stored in Postgres staging tables."""
+        pg = PostgresHook(postgres_conn_id="postgres_source")
+        conn = pg.get_conn()
         cur = conn.cursor()
 
         validation_summary = {}
 
-        for table_name, payload in extracted_data.items():
-            df = payload["df"]
+        for source_table, payload in extracted_data.items():
+            staging_table = payload["staging_table"]
             columns = payload["columns"]
+
+            df = pg.get_pandas_df(sql=f"SELECT * FROM {staging_table}")
 
             table_errors = []
             table_warnings = []
 
-            # Required columns (NOT NULL)
             cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
-                WHERE table_schema = %s
-                  AND table_name = %s
-                  AND is_nullable = 'NO'
-            """, table_name.split("."))
+                WHERE table_schema = 'public'
+                AND table_name = %s
+                AND is_nullable = 'NO'
+            """, (staging_table,))
             non_nullable_cols = [row[0] for row in cur.fetchall()]
 
-            # Check nulls
             for col in non_nullable_cols:
                 if col in df.columns and df[col].isna().sum() > 0:
                     table_errors.append(f"Nulls in {col}")
 
-            # Numeric type check
             numeric_cols = [c for c in df.columns if df[c].dtype.kind in "iuf"]
             for col in numeric_cols:
                 if not pd.api.types.is_numeric_dtype(df[col]):
                     table_errors.append(f"Bad numeric type: {col}")
 
-            # Future dates
             date_cols = [c for c in df.columns if "date" in c.lower()]
             for col in date_cols:
                 if pd.api.types.is_datetime64_any_dtype(df[col]):
                     if (df[col] > pd.Timestamp.now()).any():
                         table_warnings.append(f"Future dates in {col}")
 
-            # Negative revenue
-            revenue_cols = [c for c in df.columns if any(k in c.lower() for k in ["amount", "price", "total"])]
+            revenue_cols = [
+                c for c in df.columns
+                if any(k in c.lower() for k in ["amount", "price", "total"])
+            ]
             for col in revenue_cols:
                 if (df[col] < 0).any():
                     table_errors.append(f"Negative values in {col}")
 
-            # Duplicate primary keys
+            schema, table = source_table.split(".")
+
             cur.execute("""
                 SELECT kcu.column_name
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_name = kcu.constraint_name
+                ON tc.constraint_name = kcu.constraint_name
                 WHERE tc.table_schema = %s
-                  AND tc.table_name = %s
-                  AND tc.constraint_type = 'PRIMARY KEY'
-            """, table_name.split("."))
+                AND tc.table_name = %s
+                AND tc.constraint_type = 'PRIMARY KEY'
+            """, (schema, table))
             pk_cols = [row[0] for row in cur.fetchall()]
 
             if pk_cols:
                 if df.duplicated(subset=pk_cols).any():
                     table_errors.append("Duplicate primary keys")
 
-            validation_summary[table_name] = {
+            validation_summary[source_table] = {
+                "staging_table": staging_table,
                 "status": "PASS" if not table_errors else "FAIL",
                 "errors": table_errors,
                 "warnings": table_warnings
@@ -226,209 +241,440 @@ def adventureworks_dag():
         return validation_summary
 
 
-
-
-    # Attempt to combine multiple tables into 1 customer table..
-    # Not finished!!! Broken for now..
-
     @task
-    def build_customer_staging(extracted_data: dict) -> str:
-        """Build Customer staging table and load it into StarRocks."""
+    def build_dim_customer():
+        import pandas as pd
+        from datetime import date
 
-        # Load source tables
-        person_df = extracted_data.get("person.person", {}).get("df")
-        email_df = extracted_data.get("person.emailaddress", {}).get("df")
-        phone_df = extracted_data.get("person.personphone", {}).get("df")
-        customer_df = extracted_data.get("sales.customer", {}).get("df")
-        address_df = extracted_data.get("person.address", {}).get("df")
-        beaddr_df = extracted_data.get("person.businessentityaddress", {}).get("df")
-        salesorder_df = extracted_data.get("sales.salesorderheader", {}).get("df")
+        pg = PostgresHook(postgres_conn_id="postgres_source")
 
-        if person_df is None or customer_df is None:
-            raise ValueError("Missing person.person or sales.customer")
+        customer = pg.get_pandas_df("""
+            SELECT
+                customerid,
+                personid,
+                storeid,
+                territoryid,
+                modifieddate AS sourceupdatedate
+            FROM staging_sales_customer
+        """)
 
-        # Clean column names
-        for df in [person_df, email_df, phone_df, customer_df, address_df, beaddr_df, salesorder_df]:
-            if df is not None:
-                df.columns = [c.lower() for c in df.columns]
-                df.drop(columns=[c for c in df.columns if c == "modifieddate"], inplace=True, errors="ignore")
+        store = pg.get_pandas_df("""
+            SELECT
+                businessentityid AS storeid,
+                name AS store_name,
+                demographics
+            FROM staging_sales_store
+        """)
 
-        # Join person + email + phone
-        person_full = person_df.copy()
-        if email_df is not None:
-            person_full = person_full.merge(email_df, on="businessentityid", how="left")
-        if phone_df is not None:
-            person_full = person_full.merge(phone_df, on="businessentityid", how="left")
+        person = pg.get_pandas_df("""
+            SELECT
+                businessentityid AS personid,
+                firstname,
+                lastname
+            FROM staging_person_person
+        """)
 
-        person_full["customername"] = (
-            person_full["firstname"].fillna("") + " " + person_full["lastname"].fillna("")
-        ).str.strip()
+        email = pg.get_pandas_df("""
+            SELECT
+                businessentityid AS personid,
+                emailaddress
+            FROM staging_person_emailaddress
+        """)
 
-        # Join customer
-        staging = customer_df.merge(person_full, left_on="personid", right_on="businessentityid", how="left")
+        phone = pg.get_pandas_df("""
+            SELECT
+                businessentityid AS personid,
+                phonenumber
+            FROM staging_person_personphone
+        """)
 
-        # Join address info
-        if beaddr_df is not None and address_df is not None:
-            staging = staging.merge(beaddr_df, left_on="personid", right_on="businessentityid", how="left")
-            staging = staging.merge(address_df, on="addressid", how="left")
+        address = pg.get_pandas_df("""
+            SELECT
+                bea.businessentityid,
+                a.city,
+                a.postalcode,
+                sp.name AS state_province,
+                cr.name AS country
+            FROM staging_person_businessentityaddress bea
+            JOIN staging_person_address a
+                ON bea.addressid = a.addressid
+            JOIN staging_person_stateprovince sp
+                ON a.stateprovinceid = sp.stateprovinceid
+            JOIN staging_person_countryregion cr
+                ON sp.countryregioncode = cr.countryregioncode
+        """)
 
-        # Derive fields
-        staging["customertype"] = staging["storeid"].apply(lambda x: "Corporate" if pd.notna(x) else "Individual")
+        orders = pg.get_pandas_df("""
+            SELECT
+                customerid,
+                MIN(orderdate) AS first_order_date,
+                MAX(orderdate) AS last_order_date,
+                SUM(totaldue) AS total_spend
+            FROM staging_sales_salesorderheader
+            GROUP BY customerid
+        """)
 
-        if salesorder_df is not None and "customerid" in salesorder_df.columns:
-            fp = salesorder_df.groupby("customerid")["orderdate"].min().reset_index()
-            fp.rename(columns={"orderdate": "firstpurchase"}, inplace=True)
-            staging = staging.merge(fp, on="customerid", how="left")
-            staging["yearssincefirstpurchase"] = (
-                pd.Timestamp.now().year - staging["firstpurchase"].dt.year
-            ).fillna(0).astype(int)
-        else:
-            staging["yearssincefirstpurchase"] = 0
-
-        staging["customersegment"] = staging["yearssincefirstpurchase"].apply(
-            lambda y: "Premium" if y >= 5 else "Standard"
+        df = (
+            customer
+            .merge(store, on="storeid", how="left")
+            .merge(person, on="personid", how="left")
+            .merge(email, on="personid", how="left")
+            .merge(phone, on="personid", how="left")
+            .merge(address, left_on="storeid", right_on="businessentityid", how="left")
+            .merge(address, left_on="personid", right_on="businessentityid", how="left", suffixes=("", "_person"))
+            .merge(orders, on="customerid", how="left")
         )
-        staging["accountstatus"] = "Active"
-        staging["creditlimit"] = 0
-        staging["annualincome"] = 0
 
-        # Select final columns
-        final_cols = [
-            "customerid", "customername", "emailaddress", "phonenumber", "city",
-            "stateprovinceid", "countryregioncode", "postalcode",
-            "customersegment", "customertype", "accountstatus",
-            "creditlimit", "annualincome", "yearssincefirstpurchase"
+
+        df["CustomerType"] = df.apply(
+            lambda r: "Individual" if pd.notnull(r["personid"]) else "Store",
+            axis=1
+        )
+
+        df["CustomerName"] = df.apply(
+            lambda r: f"{r['firstname']} {r['lastname']}" if r["CustomerType"] == "Individual" else r["store_name"],
+            axis=1
+        )
+
+        df["Email"] = df["emailaddress"]
+
+        df["Phone"] = df["phonenumber"]
+
+        df["City"] = df.apply(
+            lambda r: r["city"] if r["CustomerType"] == "Store" else r["city_person"],
+            axis=1
+        )
+        df["StateProvince"] = df.apply(
+            lambda r: r["state_province"] if r["CustomerType"] == "Store" else r["state_province_person"],
+            axis=1
+        )
+        df["Country"] = df.apply(
+            lambda r: r["country"] if r["CustomerType"] == "Store" else r["country_person"],
+            axis=1
+        )
+        df["PostalCode"] = df.apply(
+            lambda r: r["postalcode"] if r["CustomerType"] == "Store" else r["postalcode_person"],
+            axis=1
+        )
+
+        df = df.drop(columns=[
+            "city",
+            "state_province",
+            "country",
+            "postalcode",
+            "city_person",
+            "state_province_person",
+            "country_person",
+            "postalcode_person",
+            "businessentityid",
+            "businessentityid_person"
+        ], errors="ignore")
+
+
+        def extract_annual_revenue(xml):
+            if xml is None:
+                return None
+            try:
+                import xml.etree.ElementTree as ET
+                root = ET.fromstring(xml)
+                rev = root.find(".//{http://schemas.microsoft.com/sqlserver/2004/07/adventure-works/StoreSurvey}AnnualRevenue")
+                return float(rev.text) if rev is not None else None
+            except:
+                return None
+
+        df["AnnualIncome"] = df["demographics"].apply(extract_annual_revenue)
+
+        today = pd.to_datetime(date.today())
+        df["YearsSinceFirstPurchase"] = (
+            (today - pd.to_datetime(df["first_order_date"])).dt.days // 365
+        )
+
+        df["AccountStatus"] = df["last_order_date"].apply(
+            lambda d: "Active" if pd.notnull(d) and (today - pd.to_datetime(d)).days <= 365
+            else ("Inactive" if pd.notnull(d) else "Prospect")
+        )
+
+        def segment(row):
+            if row["CustomerType"] == "Store":
+                if row["AnnualIncome"] and row["AnnualIncome"] > 500000:
+                    return "Enterprise"
+                if row["AnnualIncome"] and row["AnnualIncome"] > 100000:
+                    return "Mid-Market"
+                return "Small Business"
+            else:
+                if row["total_spend"] and row["total_spend"] > 5000:
+                    return "High Value"
+                if row["total_spend"] and row["total_spend"] > 500:
+                    return "Medium Value"
+                return "Low Value"
+
+        df["CustomerSegment"] = df.apply(segment, axis=1)
+
+        df["CreditLimit"] = df.apply(
+            lambda r: r["AnnualIncome"] * 0.2 if r["CustomerType"] == "Store"
+            else (r["total_spend"] * 1.5 if pd.notnull(r["total_spend"]) else None),
+            axis=1
+        )
+
+        df["ValidFromDate"] = today
+        df["ValidToDate"] = None
+        df["IsCurrent"] = True
+        df["EffectiveStartDate"] = today
+        df["EffectiveEndDate"] = None
+
+
+        df = df.rename(columns={
+            "customerid": "CustomerID",
+            "personid": "PersonID",
+            "storeid": "StoreID",
+            "sourceupdatedate": "SourceUpdateDate",
+            "customername": "CustomerName",
+            "email": "Email",
+            "phone": "Phone",
+            "city": "City",
+            "state_province": "StateProvince",
+            "country": "Country",
+            "postalcode": "PostalCode",
+            "customersegment": "CustomerSegment",
+            "customertype": "CustomerType",
+            "accountstatus": "AccountStatus",
+            "creditlimit": "CreditLimit",
+            "annualincome": "AnnualIncome",
+            "yearssincefirstpurchase": "YearsSinceFirstPurchase",
+            "validfromdate": "ValidFromDate",
+            "validtodate": "ValidToDate",
+            "iscurrent": "IsCurrent",
+            "effectivestartdate": "EffectiveStartDate",
+            "effectiveenddate": "EffectiveEndDate"
+        })
+
+
+
+        return df
+
+
+
+
+        
+    @task
+    def transform_dim_customer_for_starrocks(dim_df: pd.DataFrame):
+        """Produce a DataFrame that matches the StarRocks DimCustomer schema exactly."""
+
+        df = dim_df.copy()
+
+        required_cols = [
+            "CustomerID",
+            "CustomerName",
+            "Email",
+            "Phone",
+            "City",
+            "StateProvince",
+            "Country",
+            "PostalCode",
+            "CustomerSegment",
+            "CustomerType",
+            "AccountStatus",
+            "CreditLimit",
+            "AnnualIncome",
+            "YearsSinceFirstPurchase",
+            "ValidFromDate",
+            "ValidToDate",
+            "IsCurrent",
+            "SourceUpdateDate",
+            "EffectiveStartDate",
+            "EffectiveEndDate"
         ]
-        final_cols = [c for c in final_cols if c in staging.columns]
-        staging_final = staging[final_cols].copy()
 
-        # Replace NaN with None
-        staging_final = staging_final.applymap(lambda x: None if pd.isna(x) else x)
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = None
 
-        # Load into StarRocks
-        sr = MySqlHook(mysql_conn_id="starrocks_mysql")
-        conn = sr.get_conn()
-        cursor = conn.cursor()
+        df["CustomerID"] = df["CustomerID"].astype(int)
+        df["YearsSinceFirstPurchase"] = df["YearsSinceFirstPurchase"].fillna(0).astype(int)
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS adventureworks.StagingCustomer (
-                customerid BIGINT,
-                customername VARCHAR(200),
-                emailaddress VARCHAR(200),
-                phonenumber VARCHAR(50),
-                city VARCHAR(100),
-                stateprovinceid BIGINT,
-                countryregioncode VARCHAR(10),
-                postalcode VARCHAR(20),
-                customersegment VARCHAR(50),
-                customertype VARCHAR(50),
-                accountstatus VARCHAR(50),
-                creditlimit BIGINT,
-                annualincome BIGINT,
-                yearssincefirstpurchase BIGINT
-            )
-            DUPLICATE KEY(customerid)
-            DISTRIBUTED BY HASH(customerid)
-            PROPERTIES ("replication_num" = "1");
-        """)
+        string_cols = [
+            "CustomerName", "Email", "Phone", "City", "StateProvince",
+            "Country", "PostalCode", "CustomerSegment", "CustomerType",
+            "AccountStatus"
+        ]
+        for col in string_cols:
+            df[col] = df[col].fillna("").astype(str)
 
-        cursor.execute("TRUNCATE TABLE adventureworks.StagingCustomer")
+        df["CreditLimit"] = df["CreditLimit"].fillna(0).astype(float)
+        df["AnnualIncome"] = df["AnnualIncome"].fillna(0).astype(float)
 
-        insert_sql = """
-            INSERT INTO adventureworks.StagingCustomer (
-                customerid, customername, emailaddress, phonenumber, city,
-                stateprovinceid, countryregioncode, postalcode, customersegment,
-                customertype, accountstatus, creditlimit, annualincome,
-                yearssincefirstpurchase
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
+        date_cols = [
+            "ValidFromDate", "ValidToDate", "SourceUpdateDate",
+            "EffectiveStartDate", "EffectiveEndDate"
+        ]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
 
-        cursor.executemany(insert_sql, staging_final.values.tolist())
-        conn.commit()
+        df["IsCurrent"] = df["IsCurrent"].fillna(True).astype(bool)
 
-        return "adventureworks.StagingCustomer"
+        df = df[required_cols]
+
+        print("\n=== FINAL STARROCKS DIMCUSTOMER SCHEMA ===")
+        print(df.head(10).to_string())
+        print(df.dtypes)
+
+        return df
 
 
-
-    # Attempt to check if customer exists in StarRocks
-    # Also not finished!!! First need to fix the combining task!!
 
     @task
-    def detect_dimcustomer_changes(staging_table_name: str):
+    def load_dim_customer_scd2(dim_customer_clean: pd.DataFrame):
+        import pandas as pd
+        from datetime import date, timedelta
+        from airflow.providers.mysql.hooks.mysql import MySqlHook
 
         sr = MySqlHook(mysql_conn_id="starrocks_mysql")
 
-        # Load staging
-        staging_df = sr.get_pandas_df(f"SELECT * FROM {staging_table_name}")
-        staging_df.columns = [c.lower() for c in staging_df.columns]
+        today = date.today()
+        yesterday = today - timedelta(days=1)
 
-        # Load existing DimCustomer (may be empty initially)
-        existing_df = sr.get_pandas_df("""
-            SELECT *
-            FROM adventureworks.DimCustomer
-            WHERE IsCurrent = 1
-        """)
-        if existing_df is None or existing_df.empty:
-            existing_df = pd.DataFrame(columns=["customerid"])
-        existing_df.columns = [c.lower() for c in existing_df.columns]
+        customer_ids = dim_customer_clean["CustomerID"].unique().tolist()
 
-        # Merge on natural key
-        merged = staging_df.merge(
+        chunks = [
+            customer_ids[i:i + 5000]
+            for i in range(0, len(customer_ids), 5000)
+        ]
+
+        dfs = []
+        for chunk in chunks:
+            values_clause = ",".join(f"({int(i)})" for i in chunk)
+
+            sql = f"""
+                SELECT d.*
+                FROM DimCustomer d
+                JOIN (
+                    VALUES {values_clause}
+                ) AS v(CustomerID)
+                ON d.CustomerID = v.CustomerID
+                WHERE d.IsCurrent = 1;
+            """
+
+            df = sr.get_pandas_df(sql)
+
+            print("=== EXISTING_DF COLUMNS FROM STARROCKS ===")
+            print(df.columns.tolist())
+
+            dfs.append(df)
+
+        existing_df = pd.concat(dfs) if dfs else pd.DataFrame()
+
+        merged = dim_customer_clean.merge(
             existing_df,
+            on="CustomerID",
             how="left",
-            on="customerid",
             suffixes=("_new", "_old")
         )
 
-        # New customers
-        new_customers = merged[merged["customerid_old"].isna()].copy()
+        if "CustomerKey" not in merged.columns:
+            merged["CustomerKey"] = None
 
-        # SCD2 change detection
-        scd2_cols = [
-            "customername",
-            "emailaddress",
-            "phonenumber",
-            "city",
-            "postalcode",
-            "customersegment",
-            "customertype",
-            "accountstatus",
+        new_customers = merged[merged["CustomerKey"].isna()].copy()
+
+        compare_cols = [
+            "Email",
+            "City",
+            "Country",
+            "CustomerSegment",
+            "AccountStatus"
         ]
 
-        changed_mask = False
-        for col in scd2_cols:
-            new_col = f"{col}_new"
-            old_col = f"{col}_old"
-            if new_col in merged.columns and old_col in merged.columns:
-                changed_mask |= (merged[new_col] != merged[old_col])
+        def has_changes(row):
+            for col in compare_cols:
+                if row[f"{col}_new"] != row[f"{col}_old"]:
+                    return True
+            return False
 
-        changed_customers = merged[
-            changed_mask & merged["customerid_old"].notna()
+        changed = merged[
+            (~merged["CustomerKey"].isna()) &
+            (merged.apply(has_changes, axis=1))
         ].copy()
 
-        unchanged_customers = merged[
-            (~changed_mask) & merged["customerid_old"].notna()
-        ].copy()
+        updates = []
+        for _, row in changed.iterrows():
+            updates.append(f"""
+                UPDATE DimCustomer
+                SET IsCurrent = 0,
+                    ValidToDate = '{yesterday}'
+                WHERE CustomerKey = {int(row['CustomerKey'])};
+            """)
 
-        return {
-            "new_customers": new_customers.to_dict(orient="records"),
-            "changed_customers": changed_customers.to_dict(orient="records"),
-            "unchanged_customers": unchanged_customers.to_dict(orient="records"),
+        for sql in updates:
+            sr.run(sql)
+
+        new_cols = ["CustomerID"] + [
+            f"{col}_new"
+            for col in dim_customer_clean.columns
+            if col != "CustomerID"
+        ]
+
+        inserts = pd.concat([
+            new_customers[new_cols],
+            changed[new_cols]
+        ])
+
+        rename_map = {
+            f"{col}_new": col
+            for col in dim_customer_clean.columns
+            if col != "CustomerID"
         }
+        inserts = inserts.rename(columns=rename_map)
+
+        max_key = sr.get_first(
+            "SELECT COALESCE(MAX(CustomerKey), 0) FROM DimCustomer;"
+        )[0]
+
+        inserts["CustomerKey"] = range(
+            max_key + 1,
+            max_key + 1 + len(inserts)
+        )
+
+        date_cols = [
+            "ValidFromDate",
+            "ValidToDate",
+            "EffectiveStartDate",
+            "EffectiveEndDate",
+            "SourceUpdateDate"
+        ]
+
+        for col in date_cols:
+            inserts[col] = (
+                inserts[col]
+                .astype("object")
+                .where(~inserts[col].isna(), None)
+            )
+
+        inserts["IsCurrent"] = inserts["IsCurrent"].astype(int)
+
+        if not inserts.empty:
+            sr.insert_rows(
+                table="DimCustomer",
+                rows=inserts.values.tolist(),
+                target_fields=inserts.columns.tolist()
+            )
+
+        print(f"Inserted {len(inserts)} rows")
+        print(f"Updated {len(updates)} rows")
+
+        return True
 
 
 
-
-    # Task order - work in progress whilst the other 2 tasks are broken..
-    
     tables = discover_tables()
     extracted = extract_incremental_data(tables)
     validated = validate_extracted_data(extracted)
 
-    staging_table = build_customer_staging(extracted)
-    dimcustomer_changes = detect_dimcustomer_changes(staging_table)
+    dim_customer_df = build_dim_customer()
+    dim_customer_clean = transform_dim_customer_for_starrocks(dim_customer_df)
+    load_task = load_dim_customer_scd2(dim_customer_clean)
 
+    validated >> dim_customer_df
+    dim_customer_df >> dim_customer_clean
+    dim_customer_clean >> load_task
 
 
 dag_instance = adventureworks_dag()
