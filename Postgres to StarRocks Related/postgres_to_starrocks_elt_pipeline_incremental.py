@@ -156,7 +156,7 @@ def get_checkpoint_for_comparison(checkpoint_str: str, data_type: str) -> Any:
 
 @dag(
     dag_id="postgres_to_starrocks_elt_pipeline_incremental",
-    schedule="@daily",
+    schedule=None, # schedule="@daily",
     start_date=pendulum.datetime(2026, 1, 1, tz="Europe/Tallinn"),
     catchup=False,
     max_active_tasks=3,

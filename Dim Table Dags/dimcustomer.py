@@ -7,7 +7,7 @@ STARROCKS_CONNECTION_ID = "starrocks_mysql"
 
 @dag(
     dag_id="extract_transform_combine_customer_data_into_dimcustomer_and_upload_to_starrocks",
-    schedule="@daily",
+    schedule=None, #schedule="@daily",
     start_date=pendulum.datetime(2026, 1, 1, tz="Europe/Tallinn"),
     catchup=False,
     max_active_tasks=3,

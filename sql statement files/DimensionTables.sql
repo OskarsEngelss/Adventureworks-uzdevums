@@ -130,6 +130,7 @@ PROPERTIES("replication_num" = "1");
   - **EffectiveEndDate (DATE)**
 - Merge Strategy: UPSERT with change detection on (ListPrice, Cost, Category, Status)
 
+-- Old version without ReorderPoint and SafetyStockLevel
 CREATE TABLE DimProduct (
     ProductKey INT NOT NULL,
     ValidFromDate DATE NOT NULL,
@@ -145,6 +146,49 @@ CREATE TABLE DimProduct (
     Color VARCHAR(20),
     Size VARCHAR(20),
     Weight DECIMAL(10,3),
+    ValidToDate DATE NULL,
+    IsCurrent BOOLEAN,
+    SourceUpdateDate DATE,
+    EffectiveStartDate DATE,
+    EffectiveEndDate DATE NULL
+)
+PRIMARY KEY(ProductKey, ValidFromDate)
+PARTITION BY RANGE(ValidFromDate) (
+    PARTITION p2025 VALUES LESS THAN ('2026-01-01'),
+    PARTITION p202601 VALUES LESS THAN ('2026-02-01'),
+    PARTITION p202602 VALUES LESS THAN ('2026-03-01'),
+    PARTITION p202603 VALUES LESS THAN ('2026-04-01'),
+    PARTITION p202604 VALUES LESS THAN ('2026-05-01'),
+    PARTITION p202605 VALUES LESS THAN ('2026-06-01'),
+    PARTITION p202606 VALUES LESS THAN ('2026-07-01'),
+    PARTITION p202607 VALUES LESS THAN ('2026-08-01'),
+    PARTITION p202608 VALUES LESS THAN ('2026-09-01'),
+    PARTITION p202609 VALUES LESS THAN ('2026-10-01'),
+    PARTITION p202610 VALUES LESS THAN ('2026-11-01'),
+    PARTITION p202611 VALUES LESS THAN ('2026-12-01'),
+    PARTITION p202612 VALUES LESS THAN ('2027-01-01')
+)
+DISTRIBUTED BY HASH(ProductKey) BUCKETS 10
+PROPERTIES("replication_num" = "1");
+
+-- New version with ReorderPoint and SafetyStockLevel
+CREATE TABLE DimProduct (
+    ProductKey INT NOT NULL,
+    ValidFromDate DATE NOT NULL,
+    ProductID INT NOT NULL,
+    ProductName VARCHAR(100),
+    SKU VARCHAR(50),
+    Category VARCHAR(50),
+    SubCategory VARCHAR(50),
+    Brand VARCHAR(50),
+    ListPrice DECIMAL(18,2),
+    Cost DECIMAL(18,2),
+    ProductStatus VARCHAR(20),
+    Color VARCHAR(20),
+    Size VARCHAR(20),
+    Weight DECIMAL(10,3),
+    ReorderPoint INT,
+    SafetyStockLevel INT,
     ValidToDate DATE NULL,
     IsCurrent BOOLEAN,
     SourceUpdateDate DATE,
@@ -258,6 +302,7 @@ PROPERTIES("replication_num" = "1");
   - **SourceUpdateDate (DATE)**
 - Merge Strategy: UPSERT with change detection on (JobTitle, Department, Region, Territory, Quota)
 
+-- Old version without StoreID
 CREATE TABLE DimEmployee (
     EmployeeKey INT,
     ValidFromDate DATE,
@@ -294,6 +339,43 @@ PARTITION BY RANGE(ValidFromDate) (
 DISTRIBUTED BY HASH(EmployeeKey) BUCKETS 10
 PROPERTIES("replication_num" = "1");
 
+-- New version with StoreID
+CREATE TABLE DimEmployee (
+    EmployeeKey INT,
+    ValidFromDate DATE,
+    EmployeeID INT,
+    StoreID INT,
+    EmployeeName VARCHAR(100),
+    JobTitle VARCHAR(50),
+    Department VARCHAR(50),
+    ReportingManagerKey INT,
+    HireDate DATE,
+    EmployeeStatus VARCHAR(20),
+    Region VARCHAR(50),
+    Territory VARCHAR(50),
+    SalesQuota DECIMAL(18,2),
+    ValidToDate DATE NULL,
+    IsCurrent BOOLEAN,
+    SourceUpdateDate DATE
+)
+PRIMARY KEY(EmployeeKey, ValidFromDate)
+PARTITION BY RANGE(ValidFromDate) (
+    PARTITION p2025 VALUES LESS THAN ('2026-01-01'),
+    PARTITION p202601 VALUES LESS THAN ('2026-02-01'),
+    PARTITION p202602 VALUES LESS THAN ('2026-03-01'),
+    PARTITION p202603 VALUES LESS THAN ('2026-04-01'),
+    PARTITION p202604 VALUES LESS THAN ('2026-05-01'),
+    PARTITION p202605 VALUES LESS THAN ('2026-06-01'),
+    PARTITION p202606 VALUES LESS THAN ('2026-07-01'),
+    PARTITION p202607 VALUES LESS THAN ('2026-08-01'),
+    PARTITION p202608 VALUES LESS THAN ('2026-09-01'),
+    PARTITION p202609 VALUES LESS THAN ('2026-10-01'),
+    PARTITION p202610 VALUES LESS THAN ('2026-11-01'),
+    PARTITION p202611 VALUES LESS THAN ('2026-12-01'),
+    PARTITION p202612 VALUES LESS THAN ('2027-01-01')
+)
+DISTRIBUTED BY HASH(EmployeeKey) BUCKETS 10
+PROPERTIES("replication_num" = "1");
 
 
 **DimPromotion** (SCD Type 1 or Type 2 - Configurable per business rules)

@@ -7,7 +7,7 @@ STARROCKS_CONNECTION_ID = "starrocks_mysql"
 
 @dag(
     dag_id="extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starrocks",
-    schedule="@daily",
+    schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Europe/Tallinn"),
     catchup=False,
     tags=["starrocks", "dimemployee", "load", "adventureworks"],
@@ -28,13 +28,12 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
         starrocks_hook.run("DELETE FROM adventureworks_staging.stg_dim_employee_upsert WHERE EmployeeID IS NOT NULL;")
 
         # 2. TRANSFORM & LOAD TO STAGING
-        # Combining HR (Employee, Dept), Person (Names), and Sales (Quota, Territory)
-        # 2. TRANSFORM & LOAD TO STAGING
-        # 2. TRANSFORM & LOAD TO STAGING
+        # Added join to stg_sales_store to get the StoreID associated with the SalesPerson
         load_staging_sql = f"""
             INSERT INTO adventureworks_staging.stg_dim_employee_upsert
             SELECT 
                 data.EmployeeID,
+                data.StoreID,
                 data.EmployeeName,
                 data.jobtitle,
                 data.Department,
@@ -48,6 +47,7 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
             FROM (
                 SELECT 
                     e.businessentityid AS EmployeeID,
+                    COALESCE(ss.businessentityid, -1) AS StoreID,
                     CONCAT(p.firstname, ' ', p.lastname) AS EmployeeName,
                     e.jobtitle,
                     d.name AS Department,
@@ -57,7 +57,6 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                     st.`group` AS Region,
                     st.name AS Territory,
                     COALESCE(sq.salesquota, 0) AS SalesQuota,
-                    -- Rank quotas by date so we only pick the latest one
                     ROW_NUMBER() OVER(PARTITION BY e.businessentityid ORDER BY sq.modifieddate DESC) as q_rank
                 FROM adventureworks_staging.stg_humanresources_employee e
                 INNER JOIN adventureworks_staging.stg_person_person p 
@@ -66,14 +65,17 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                     ON e.businessentityid = edh.businessentityid AND edh.enddate IS NULL
                 INNER JOIN adventureworks_staging.stg_humanresources_department d 
                     ON edh.departmentid = d.departmentid
+                LEFT JOIN adventureworks_staging.stg_sales_salesperson sp 
+                    ON e.businessentityid = sp.businessentityid
+                -- Join to Store staging to find which store this salesperson is assigned to
+                LEFT JOIN adventureworks_staging.stg_sales_store ss
+                    ON sp.businessentityid = ss.salespersonid
+                LEFT JOIN adventureworks_staging.stg_sales_salesterritory st 
+                    ON sp.territoryid = st.territoryid
                 LEFT JOIN adventureworks_staging.stg_humanresources_employee mgr 
                     ON e.organizationnode LIKE CONCAT(mgr.organizationnode, '%')
                     AND (LENGTH(e.organizationnode) - LENGTH(REPLACE(e.organizationnode, '/', ''))) = 
                         (LENGTH(mgr.organizationnode) - LENGTH(REPLACE(mgr.organizationnode, '/', ''))) + 1
-                LEFT JOIN adventureworks_staging.stg_sales_salesperson sp 
-                    ON e.businessentityid = sp.businessentityid
-                LEFT JOIN adventureworks_staging.stg_sales_salesterritory st 
-                    ON sp.territoryid = st.territoryid
                 LEFT JOIN adventureworks_staging.stg_sales_salespersonquotahistory sq 
                     ON sp.businessentityid = sq.businessentityid
             ) data
@@ -81,7 +83,7 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
         """
         starrocks_hook.run(load_staging_sql)
 
-        # 3. EXPIRE logic (Change detection on JobTitle, Department, Region, Territory, Quota)
+        # 3. EXPIRE logic (Added StoreID to change detection)
         expire_sql = f"""
             UPDATE DimEmployee
             SET IsCurrent = FALSE, 
@@ -94,21 +96,22 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                 DimEmployee.Department != s.Department OR 
                 DimEmployee.Region != s.Region OR 
                 DimEmployee.Territory != s.Territory OR 
-                DimEmployee.SalesQuota != s.SalesQuota
+                DimEmployee.SalesQuota != s.SalesQuota OR
+                DimEmployee.StoreID != s.StoreID
             );
         """
         starrocks_hook.run(expire_sql)
 
-        # 4. INSERT logic
+        # 4. INSERT logic (Added StoreID to column list)
         insert_sql = f"""
             INSERT INTO DimEmployee (
-                EmployeeKey, ValidFromDate, EmployeeID, EmployeeName, JobTitle, 
+                EmployeeKey, ValidFromDate, EmployeeID, StoreID, EmployeeName, JobTitle, 
                 Department, ReportingManagerKey, HireDate, EmployeeStatus, 
                 Region, Territory, SalesQuota, ValidToDate, IsCurrent, SourceUpdateDate
             )
             SELECT 
                 murmur_hash3_32(CONCAT(CAST(s.EmployeeID AS CHAR), '{proc_date}')),
-                '{proc_date}', s.EmployeeID, s.EmployeeName, s.JobTitle,
+                '{proc_date}', s.EmployeeID, s.StoreID, s.EmployeeName, s.JobTitle,
                 s.Department, s.ReportingManagerKey, s.HireDate, s.EmployeeStatus,
                 s.Region, s.Territory, s.SalesQuota, NULL, TRUE, s.SourceUpdateDate
             FROM adventureworks_staging.stg_dim_employee_upsert s
