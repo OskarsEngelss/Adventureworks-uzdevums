@@ -1,7 +1,8 @@
 import datetime
 import pendulum
-from airflow.sdk import dag, task
+from airflow.decorators import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
+from utilities import log_error_to_warehouse
 
 STARROCKS_CONNECTION_ID = "starrocks_mysql"
 
@@ -21,51 +22,76 @@ def extract_transform_load_inventory_data_into_factinventory_and_upload_to_starr
     @task
     def synchronize_postgresql_to_starrocks():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
+        proc_date = pendulum.now().to_date_string()
 
-        # 1. QUARANTINE (Same as before)
+        # --- STEP 1: QUARANTINE ---
+        # Catching missing products, warehouses, or invalid quantities
         quarantine_sql = """
-            INSERT INTO adventureworks_errors.fact_inventory_errors (
-                ProductID, LocationID, FailureReason, IsRecoverable, FailedData
+            INSERT INTO adventureworks_errors.error_records (
+                ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
+                IsRecoverable, RetryCount, IsResolved, FailedData
             )
             SELECT 
-                s.productid, s.locationid,
+                CURRENT_TIMESTAMP(),
+                'FactInventory',
+                CONCAT(CAST(s.productid AS CHAR), '-', CAST(s.locationid AS CHAR)),
                 CASE 
                     WHEN p.ProductKey IS NULL THEN 'Missing ProductKey'
-                    WHEN s.quantity < 0 THEN 'Negative Quantity'
-                END as FailureReason,
-                1 as IsRecoverable,
+                    WHEN w.WarehouseKey IS NULL THEN 'Missing WarehouseKey'
+                    WHEN CAST(s.quantity AS SIGNED) < 0 THEN 'Negative Quantity'
+                END,
+                1, 0, 0,
                 json_object(
-                    'product_id', CAST(s.productid AS VARCHAR),
-                    'location_id', CAST(s.locationid AS VARCHAR),
-                    'quantity', CAST(s.quantity AS VARCHAR)
-                ) as FailedData
+                    'product_id', CAST(s.productid AS CHAR),
+                    'location_id', CAST(s.locationid AS CHAR),
+                    'quantity', CAST(s.quantity AS CHAR)
+                )
             FROM adventureworks_staging.stg_production_productinventory s
-            LEFT JOIN DimProduct p ON s.productid = p.productid AND p.IsCurrent = TRUE
-            WHERE p.ProductKey IS NULL OR s.quantity < 0;
+            LEFT JOIN adventureworks.DimProduct p 
+                ON s.productid = p.productid AND p.IsCurrent = 1
+            LEFT JOIN adventureworks.DimWarehouse w 
+                ON CAST(s.locationid AS SIGNED) = w.WarehouseID AND w.IsCurrent = 1
+            WHERE p.ProductKey IS NULL 
+               OR w.WarehouseKey IS NULL 
+               OR CAST(s.quantity AS SIGNED) < 0;
         """
         starrocks_hook.run(quarantine_sql)
 
-        # 2. LOAD FACT TABLE: Now pulling real values from DimProduct
-        load_fact_sql = """
-            INSERT INTO FactInventory (
-                InventoryDateKey, ProductKey, StoreKey, WarehouseKey, 
-                QuantityOnHand, StockAgingDays, ReorderLevel, SafetyStock
+        try:
+            # --- STEP 2: LOAD FACT TABLE ---
+            # Using INNER JOINs to ensure only valid, joined data enters the fact
+            load_fact_sql = """
+                INSERT INTO adventureworks.FactInventory (
+                    InventoryDateKey, ProductKey, StoreKey, WarehouseKey, 
+                    QuantityOnHand, StockAgingDays, ReorderLevel, SafetyStock
+                )
+                SELECT 
+                    CURRENT_DATE(), 
+                    p.ProductKey,
+                    0, -- Placeholder for StoreKey (Inventory is Warehouse-based)
+                    w.WarehouseKey,
+                    CAST(s.quantity AS INT),
+                    DATEDIFF(CURRENT_DATE(), s.modifieddate),
+                    p.ReorderPoint,
+                    p.SafetyStockLevel
+                FROM adventureworks_staging.stg_production_productinventory s
+                INNER JOIN adventureworks.DimProduct p 
+                    ON s.productid = p.productid AND p.IsCurrent = 1
+                INNER JOIN adventureworks.DimWarehouse w 
+                    ON CAST(s.locationid AS SIGNED) = w.WarehouseID AND w.IsCurrent = 1
+                WHERE CAST(s.quantity AS SIGNED) >= 0;
+            """
+            starrocks_hook.run(load_fact_sql)
+
+        except Exception as e:
+            log_error_to_warehouse(
+                hook=starrocks_hook,
+                source_table="FactInventory",
+                natural_key="BATCH_" + proc_date,
+                error=e,
+                failed_data="Batch failure during FactInventory transformation"
             )
-            SELECT 
-                CURRENT_DATE(), 
-                p.ProductKey,
-                0, 
-                s.locationid, 
-                CAST(s.quantity AS INT),
-                -- CALCULATION: Days since the stock record was last modified
-                DATEDIFF(CURRENT_DATE(), s.modifieddate) as StockAgingDays,
-                p.ReorderPoint,
-                p.SafetyStockLevel
-            FROM adventureworks_staging.stg_production_productinventory s
-            INNER JOIN DimProduct p ON s.productid = p.productid AND p.IsCurrent = TRUE
-            WHERE s.quantity >= 0;
-        """
-        starrocks_hook.run(load_fact_sql)
+            raise
 
     synchronize_postgresql_to_starrocks()
 

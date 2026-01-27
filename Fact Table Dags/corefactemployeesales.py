@@ -1,7 +1,8 @@
 import datetime
 import pendulum
-from airflow.sdk import dag, task
+from airflow.decorators import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
+from utilities import log_error_to_warehouse
 
 STARROCKS_CONNECTION_ID = "starrocks_mysql"
 
@@ -21,68 +22,90 @@ def extract_transform_load_sales_data_into_factemployeesales_and_upload_to_starr
     @task
     def synchronize_postgresql_to_starrocks():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
+        proc_date = pendulum.now().to_date_string()
 
-        # 1. QUARANTINE: Catch missing EmployeeKeys or TerritoryKeys before loading
+        # --- STEP 1: QUARANTINE ---
+        # Identifying rows that will fail the join or contain invalid metrics
         quarantine_sql = """
-            INSERT INTO adventureworks_errors.fact_employeesales_errors (
-                SalesOrderID, FailureReason, IsRecoverable, FailedData
+            INSERT INTO adventureworks_errors.error_records (
+                ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
+                IsRecoverable, RetryCount, IsResolved, FailedData
             )
             SELECT 
-                soh.salesorderid,
+                CURRENT_TIMESTAMP(),
+                'FactEmployeeSales',
+                CAST(soh.salesorderid AS CHAR),
                 CASE 
                     WHEN e.EmployeeKey IS NULL THEN 'Missing EmployeeKey'
-                    WHEN st.TerritoryKey IS NULL THEN 'Missing TerritoryKey'
-                    WHEN (soh.totaldue < 0 OR soh.totaldue IS NULL) THEN 'Invalid Sales Amount'
-                END as FailureReason,
-                1 as IsRecoverable,
+                    WHEN st.TerritoryKey IS NULL AND soh.territoryid IS NOT NULL THEN 'Missing TerritoryKey'
+                    WHEN soh.totaldue < 0 OR soh.totaldue IS NULL THEN 'Invalid Sales Amount'
+                END,
+                1, 0, 0,
                 json_object(
-                    'sales_person_id', CAST(soh.salespersonid AS VARCHAR),
-                    'territory_id', CAST(soh.territoryid AS VARCHAR),
-                    'total_due', CAST(soh.totaldue AS VARCHAR)
-                ) as FailedData
+                    'salespersonid', CAST(soh.salespersonid AS CHAR),
+                    'territoryid', CAST(soh.territoryid AS CHAR),
+                    'totaldue', CAST(soh.totaldue AS CHAR)
+                )
             FROM adventureworks_staging.stg_sales_salesorderheader soh
-            LEFT JOIN DimEmployee e ON soh.salespersonid = e.EmployeeID AND e.IsCurrent = 1
-            LEFT JOIN DimSalesTerritory st ON soh.territoryid = st.TerritoryID
+            LEFT JOIN adventureworks.DimEmployee e 
+                ON soh.salespersonid = e.EmployeeID AND e.IsCurrent = 1
+            LEFT JOIN adventureworks.DimSalesTerritory st 
+                ON soh.territoryid = st.TerritoryID
             WHERE (e.EmployeeKey IS NULL AND soh.salespersonid IS NOT NULL)
                OR (st.TerritoryKey IS NULL AND soh.territoryid IS NOT NULL)
                OR (soh.totaldue < 0 OR soh.totaldue IS NULL);
         """
         starrocks_hook.run(quarantine_sql)
 
-        # 2. LOAD FACT TABLE
-        load_fact_sql = """
-            INSERT INTO FactEmployeeSales (
-                SalesDateKey, EmployeeKey, StoreKey, 
-                SalesTerritoryKey, SalesAmount, SalesTarget, CustomerContactsCount
-            )
-            WITH DailyAgg AS (
+        try:
+            # --- STEP 2: LOAD FACT TABLE ---
+            # Using a CTE to aggregate daily performance and joining with quota history
+            load_fact_sql = """
+                INSERT INTO adventureworks.FactEmployeeSales (
+                    SalesDateKey, EmployeeKey, StoreKey, 
+                    SalesTerritoryKey, SalesAmount, SalesTarget, CustomerContactsCount
+                )
+                WITH DailyAgg AS (
+                    SELECT 
+                        CAST(orderdate AS DATE) as SalesDate,
+                        salespersonid,
+                        territoryid,
+                        SUM(totaldue) as DailyTotal,
+                        COUNT(salesorderid) as ContactCount
+                    FROM adventureworks_staging.stg_sales_salesorderheader
+                    WHERE salespersonid IS NOT NULL
+                      AND totaldue >= 0 -- Only process valid amounts
+                    GROUP BY 1, 2, 3
+                )
                 SELECT 
-                    CAST(orderdate AS DATE) as SalesDate,
-                    salespersonid,
-                    territoryid,
-                    SUM(totaldue) as DailyTotal,
-                    COUNT(salesorderid) as ContactCount
-                FROM adventureworks_staging.stg_sales_salesorderheader
-                WHERE salespersonid IS NOT NULL
-                GROUP BY 1, 2, 3
+                    da.SalesDate,
+                    e.EmployeeKey,
+                    -1, -- Placeholder for StoreKey
+                    COALESCE(st.TerritoryKey, -1),
+                    da.DailyTotal,
+                    COALESCE(dq.salesquota / 90, 0), -- Daily target based on quarterly quota
+                    da.ContactCount
+                FROM DailyAgg da
+                INNER JOIN adventureworks.DimEmployee e 
+                    ON da.salespersonid = e.EmployeeID AND e.IsCurrent = 1
+                LEFT JOIN adventureworks.DimSalesTerritory st 
+                    ON da.territoryid = st.TerritoryID
+                LEFT JOIN adventureworks_staging.stg_sales_salespersonquotahistory dq 
+                    ON da.salespersonid = dq.businessentityid 
+                    AND da.SalesDate >= CAST(dq.quotadate AS DATE)
+                    AND da.SalesDate < DATE_ADD(CAST(dq.quotadate AS DATE), INTERVAL 3 MONTH);
+            """
+            starrocks_hook.run(load_fact_sql)
+
+        except Exception as e:
+            log_error_to_warehouse(
+                hook=starrocks_hook,
+                source_table="FactEmployeeSales",
+                natural_key="BATCH_" + proc_date,
+                error=e,
+                failed_data="Batch failure during FactEmployeeSales transformation"
             )
-            SELECT 
-                da.SalesDate,
-                e.EmployeeKey,
-                -1,
-                COALESCE(st.TerritoryKey, -1), -- Changed to TerritoryKey
-                da.DailyTotal,
-                COALESCE(dq.SalesQuota / 90, 0),
-                da.ContactCount
-            FROM DailyAgg da
-            INNER JOIN DimEmployee e ON da.salespersonid = e.EmployeeID AND e.IsCurrent = 1
-            LEFT JOIN DimSalesTerritory st ON da.territoryid = st.TerritoryID
-            LEFT JOIN adventureworks_staging.stg_sales_salespersonquotahistory dq 
-                ON da.salespersonid = dq.businessentityid 
-                AND da.SalesDate >= dq.quotadate 
-                AND da.SalesDate < DATE_ADD(dq.quotadate, INTERVAL 3 MONTH);
-        """
-        starrocks_hook.run(load_fact_sql)
+            raise
 
     synchronize_postgresql_to_starrocks()
 

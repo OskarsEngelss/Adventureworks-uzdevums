@@ -118,3 +118,117 @@ CREATE TABLE adventureworks_errors.fact_returns_errors (
 DUPLICATE KEY (ReturnID)
 DISTRIBUTED BY HASH(ReturnID) BUCKETS 5
 PROPERTIES("replication_num" = "1");
+
+
+-- Aggregated Fact Table Error Logs
+-- Aggregated Fact Table Error Logs
+-- Aggregated Fact Table Error Logs
+
+
+CREATE TABLE adventureworks_errors.agg_daily_sales_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    SalesDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID, SalesDateKey)
+DISTRIBUTED BY HASH(SalesDateKey) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+CREATE TABLE adventureworks_errors.agg_weekly_sales_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    WeekStartDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID, WeekStartDateKey)
+DISTRIBUTED BY HASH(WeekStartDateKey) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+CREATE TABLE adventureworks_errors.agg_monthly_sales_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    MonthStartDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID)
+DISTRIBUTED BY HASH(ErrorID) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+CREATE TABLE adventureworks_errors.agg_daily_inventory_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    InventoryDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID)
+DISTRIBUTED BY HASH(ErrorID) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+CREATE TABLE adventureworks_errors.agg_monthly_product_performance_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    MonthStartDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID)
+DISTRIBUTED BY HASH(ErrorID) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+CREATE TABLE adventureworks_errors.agg_regional_sales_errors (
+    ErrorID BIGINT AUTO_INCREMENT,
+    MonthStartDateKey DATE,
+    FailureReason VARCHAR(255),
+    FailedAt DATETIME,
+    SQLState VARCHAR(20)
+) 
+ENGINE=OLAP
+DUPLICATE KEY(ErrorID)
+DISTRIBUTED BY HASH(ErrorID) BUCKETS 1
+PROPERTIES("replication_num" = "1");
+
+
+
+
+
+
+
+
+
+
+
+CREATE TABLE adventureworks_errors.error_records (
+    ErrorID BIGINT AUTO_INCREMENT,
+    ErrorDate DATETIME,
+    SourceTable VARCHAR(100),
+    RecordNaturalKey VARCHAR(255),
+    FailureReason VARCHAR(255),
+    FailedData JSON,
+    IsRecoverable TINYINT,
+    RetryCount INT,
+    IsResolved TINYINT,
+    LastAttemptDate DATETIME,
+    ResolutionComment VARCHAR(500)
+) ENGINE=OLAP
+PRIMARY KEY(ErrorID)
+DISTRIBUTED BY HASH(ErrorID) BUCKETS 3;

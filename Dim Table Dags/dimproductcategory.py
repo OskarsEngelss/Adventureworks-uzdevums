@@ -1,13 +1,14 @@
 import datetime
 import pendulum
-from airflow.sdk import dag, task
+from airflow.decorators import dag, task
 from airflow.providers.mysql.hooks.mysql import MySqlHook
+from utilities import log_error_to_warehouse
 
 STARROCKS_CONNECTION_ID = "starrocks_mysql"
 
 @dag(
     dag_id="extract_transform_combine_product_category_data_into_dimproductcategory_and_upload_to_starrocks",
-    schedule=None, #schedule="@daily",
+    schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Europe/Tallinn"),
     catchup=False,
     tags=["starrocks", "dimproductcategory", "load", "adventureworks"],
@@ -21,40 +22,76 @@ def extract_transform_combine_product_category_data_into_dimproductcategory_and_
     @task
     def synchronize_postgresql_to_starrocks():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
+        proc_date = pendulum.now().to_date_string()
 
-        # 1. Clean Staging
-        starrocks_hook.run("DELETE FROM adventureworks_staging.stg_dim_product_category_upsert WHERE ProductCategoryID IS NOT NULL;")
-
-        # 2. TRANSFORM & LOAD TO STAGING
-        load_staging_sql = """
-            INSERT INTO adventureworks_staging.stg_dim_product_category_upsert
-            SELECT 
-                ProductCategoryID,
-                CategoryName,
-                CategoryDescription,
-                CURRENT_DATE() AS SourceUpdateDate
-            FROM (
-                SELECT 1 as ProductCategoryID, 'Bikes' as CategoryName, 'Mountain, Road, and Touring bikes' as CategoryDescription
-                UNION ALL SELECT 2, 'Components', 'Replacement parts like handlebars, pedals, and frames' as CategoryDescription
-                UNION ALL SELECT 3, 'Clothing', 'Jerseys, shorts, and seasonal riding gear' as CategoryDescription
-                UNION ALL SELECT 4, 'Accessories', 'Helmets, pumps, tires, and bottles' as CategoryDescription
-            ) src;
-        """
-        starrocks_hook.run(load_staging_sql)
-
-        # 3. UPSERT Logic (SCD Type 1)
-        upsert_sql = """
-            INSERT INTO DimProductCategory (
-                ProductCategoryKey, ProductCategoryID, CategoryName, CategoryDescription
+        # --- STEP 1: QUARANTINE (Identify Bad Data) ---
+        quarantine_sql = """
+            INSERT INTO adventureworks_errors.error_records (
+                ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
+                IsRecoverable, RetryCount, IsResolved, FailedData
             )
             SELECT 
-                murmur_hash3_32(CAST(s.ProductCategoryID AS CHAR)) AS ProductCategoryKey,
-                s.ProductCategoryID, 
-                s.CategoryName, 
-                s.CategoryDescription
-            FROM adventureworks_staging.stg_dim_product_category_upsert s;
+                CURRENT_TIMESTAMP(),
+                'DimProductCategory',
+                COALESCE(CAST(stg.productcategoryid AS CHAR), 'MISSING'),
+                'Missing CategoryID or Name',
+                1, 0, 0,
+                json_object('categoryid', stg.productcategoryid, 'name', stg.name)
+            FROM adventureworks_staging.stg_production_productcategory stg
+            WHERE stg.productcategoryid IS NULL OR stg.name IS NULL;
         """
-        starrocks_hook.run(upsert_sql)
+        starrocks_hook.run(quarantine_sql)
+
+        try:
+            # --- STEP 2: DYNAMIC STAGING LOAD ---
+            # Clean intermediate table
+            starrocks_hook.run("TRUNCATE TABLE adventureworks_staging.stg_dim_product_category_upsert;")
+
+            # Load ONLY valid records from source staging
+            load_staging_sql = """
+                INSERT INTO adventureworks_staging.stg_dim_product_category_upsert (
+                    ProductCategoryID, CategoryName, CategoryDescription, SourceUpdateDate
+                )
+                SELECT 
+                    productcategoryid, 
+                    name, 
+                    name, -- Using name as description if source doesn't have a desc col
+                    CURRENT_DATE()
+                FROM adventureworks_staging.stg_production_productcategory
+                WHERE productcategoryid IS NOT NULL AND name IS NOT NULL;
+            """
+            starrocks_hook.run(load_staging_sql)
+
+            # --- STEP 3: SCD TYPE 1 UPSERT (Delete + Insert) ---
+            # Remove existing categories so we can re-insert updated values
+            starrocks_hook.run("""
+                DELETE FROM adventureworks.DimProductCategory 
+                WHERE ProductCategoryID IN (SELECT ProductCategoryID FROM adventureworks_staging.stg_dim_product_category_upsert);
+            """)
+
+            # INSERT with SURROGATE KEY generation
+            upsert_sql = """
+                INSERT INTO adventureworks.DimProductCategory (
+                    ProductCategoryKey, ProductCategoryID, CategoryName, CategoryDescription
+                )
+                SELECT 
+                    murmur_hash3_32(CAST(s.ProductCategoryID AS CHAR)), -- PROPER SURROGATE KEY
+                    s.ProductCategoryID, 
+                    s.CategoryName, 
+                    s.CategoryDescription
+                FROM adventureworks_staging.stg_dim_product_category_upsert s;
+            """
+            starrocks_hook.run(upsert_sql)
+
+        except Exception as e:
+            log_error_to_warehouse(
+                hook=starrocks_hook,
+                source_table="DimProductCategory",
+                natural_key="BATCH_" + proc_date,
+                error=e,
+                failed_data="Batch failure during synchronize_postgresql_to_starrocks"
+            )
+            raise
 
     synchronize_postgresql_to_starrocks()
 
