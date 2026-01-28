@@ -1,1 +1,2 @@
-Pieejams install.sql un csv faili un dag faili līdz fact tabulu insertam (iesakitot pat vienu no tiem). Arī atrodami sql faili ar CREATE statementiem.
+Adventureworks uzdevums. Faili ir sadalīti pa mapītēm, bet tas tikai tāpēc, lai būtu vieglāk saprast, par ko katrs atbilst. Ja vēlas izmantot master_dag.py, lai ievietotu datus katrā Dim, Fact un Aggregate tabulā, tad ir visi dim, fact un agg python faili jāieliek vienā mapē!
+Pieejams vēl install.sql un csv faili, kā arī atrodami sql faili ar CREATE statementiem priekš dim, fact, aggregate un erroru tabulām.
