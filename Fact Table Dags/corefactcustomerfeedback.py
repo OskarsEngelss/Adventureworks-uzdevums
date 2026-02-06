@@ -24,8 +24,7 @@ def extract_transform_load_feedback_data_into_factcustomerfeedback_and_upload_to
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         proc_date = pendulum.now().to_date_string()
 
-        # --- STEP 1: QUARANTINE (Invalid Data) ---
-        # We catch bad ratings or rows where the PRODUCT is missing (critical)
+        # --- STEP 1: QUARANTINE ---
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -54,20 +53,30 @@ def extract_transform_load_feedback_data_into_factcustomerfeedback_and_upload_to
 
         try:
             # --- STEP 2: LOAD FACT TABLE ---
-            # We use COALESCE(..., -1) for CustomerKey. 
-            # If it's -1, your Reprocess DAG can try to fix it later.
+            starrocks_hook.run("TRUNCATE TABLE adventureworks.FactCustomerFeedback;")
+
             load_sql = """
                 INSERT INTO adventureworks.FactCustomerFeedback (
                     FeedbackID, FeedbackDateKey, CustomerKey, EmployeeKey, 
                     FeedbackCategoryKey, FeedbackScore, ComplaintCount, 
                     ResolutionTimeHours, CSATScore
                 )
+                WITH RankedInventory AS (
+                    SELECT 
+                        inv.productid,
+                        dw.ManagerKey,
+                        ROW_NUMBER() OVER(PARTITION BY inv.productid ORDER BY inv.quantity DESC) as inv_rank
+                    FROM adventureworks_staging.stg_production_productinventory inv
+                    JOIN adventureworks.DimWarehouse dw ON inv.locationid = dw.WarehouseID
+                    WHERE dw.IsCurrent = 1
+                )
                 SELECT 
                     stg.productreviewid,
-                    CAST(stg.reviewdate AS DATE),
-                    COALESCE(c.CustomerKey, -1),
-                    -1, -- Mocking EmployeeKey
-                    COALESCE(fcat.FeedbackCategoryKey, -1),
+                    CAST(DATE_FORMAT(stg.reviewdate, '%Y%m%d') AS SIGNED),
+                    COALESCE(c.CustomerKey, 0) AS CustomerKey,
+                    COALESCE(ri.ManagerKey, 0) AS EmployeeKey, 
+                    -- FIX: Mapping to 'Product Quality' which actually exists in your Dim
+                    COALESCE(fcat.FeedbackCategoryKey, 0) AS FeedbackCategoryKey,
                     stg.rating,
                     CASE WHEN stg.rating <= 2 THEN 1 ELSE 0 END, 
                     24.00,
@@ -76,11 +85,14 @@ def extract_transform_load_feedback_data_into_factcustomerfeedback_and_upload_to
                 LEFT JOIN adventureworks.DimProduct p 
                     ON stg.productid = p.ProductID AND p.IsCurrent = 1
                 LEFT JOIN adventureworks.DimCustomer c 
-                    ON stg.reviewername = c.CustomerName AND c.IsCurrent = 1
+                    ON stg.emailaddress = c.Email AND c.IsCurrent = 1
                 LEFT JOIN adventureworks.DimFeedbackCategory fcat 
-                    ON fcat.CategoryName = 'Product Review'
-                WHERE stg.rating BETWEEN 1 AND 5  -- Only load valid ratings
-                  AND p.ProductKey IS NULL = FALSE; -- Only load if product exists
+                    -- Matching against existing data found in your DESC/SELECT
+                    ON fcat.CategoryName = 'Product Quality'
+                LEFT JOIN RankedInventory ri 
+                    ON stg.productid = ri.productid AND ri.inv_rank = 1
+                WHERE stg.rating BETWEEN 1 AND 5
+                  AND p.ProductKey IS NOT NULL;
             """
             starrocks_hook.run(load_sql)
 

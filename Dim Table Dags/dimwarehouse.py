@@ -53,17 +53,35 @@ def extract_transform_combine_warehouse_data_into_dimwarehouse_and_upload_to_sta
 
             load_staging_sql = """
                 INSERT INTO adventureworks_staging.stg_dim_warehouse_upsert
+                WITH MainHQ AS (
+                    -- Simplified: Just get the lowest ID from the store table
+                    -- In AdventureWorks, this is always the Corporate HQ.
+                    SELECT MIN(businessentityid) as hq_id
+                    FROM adventureworks_staging.stg_sales_store
+                )
                 SELECT 
-                    locationid AS WarehouseID,
-                    name AS WarehouseName,
-                    'Main Plant' AS Location, 
+                    stg.locationid AS WarehouseID,
+                    stg.name AS WarehouseName,
+                    addr.City AS Location, 
                     CASE 
-                        WHEN costrate > 0 THEN 'Manufacturing Center' 
+                        WHEN stg.costrate > 0 THEN 'Manufacturing Center' 
                         ELSE 'Storage Facility' 
                     END AS WarehouseType,
-                    1 AS ManagerKey,
+                    COALESCE(e.EmployeeKey, 0) AS ManagerKey,
                     CURRENT_DATE() AS SourceUpdateDate
-                FROM adventureworks_staging.stg_production_location;
+                FROM adventureworks_staging.stg_production_location stg
+                -- Join the HQ ID
+                CROSS JOIN MainHQ
+                LEFT JOIN adventureworks_staging.stg_person_businessentityaddress bea 
+                    ON bea.BusinessEntityID = MainHQ.hq_id
+                LEFT JOIN adventureworks_staging.stg_person_address addr 
+                    ON bea.AddressID = addr.AddressID
+                -- Manager mapping
+                LEFT JOIN adventureworks.DimEmployee e 
+                    ON (e.JobTitle LIKE CONCAT('%WC', CAST(stg.locationid AS CHAR), '%')
+                        OR e.JobTitle LIKE CONCAT('%', stg.name, '%'))
+                    AND e.IsCurrent = 1
+                WHERE stg.locationid IS NOT NULL;
             """
             starrocks_hook.run(load_staging_sql)
 
@@ -89,16 +107,20 @@ def extract_transform_combine_warehouse_data_into_dimwarehouse_and_upload_to_sta
                     Location, WarehouseType, ManagerKey, ValidToDate, IsCurrent
                 )
                 SELECT 
-                    murmur_hash3_32(CONCAT(CAST(s.WarehouseID AS CHAR), '{proc_date}')),
+                    murmur_hash3_32(CAST(s.WarehouseID AS CHAR)),
                     '{proc_date}', 
                     s.WarehouseID, 
                     s.WarehouseName, 
                     s.Location, 
                     s.WarehouseType, 
                     s.ManagerKey, 
-                    NULL, 
-                    TRUE
-                FROM adventureworks_staging.stg_dim_warehouse_upsert s
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE '{proc_date}' END, 
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY WarehouseID ORDER BY WarehouseID) as RowRank
+                    FROM adventureworks_staging.stg_dim_warehouse_upsert
+                ) s
                 LEFT JOIN adventureworks.DimWarehouse d 
                     ON s.WarehouseID = d.WarehouseID AND d.IsCurrent = TRUE
                 WHERE d.WarehouseID IS NULL;

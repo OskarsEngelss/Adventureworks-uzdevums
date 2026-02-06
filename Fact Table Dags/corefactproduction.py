@@ -76,7 +76,7 @@ def extract_transform_load_production_data_into_factproduction_and_upload_to_sta
                     ProductionTimeHours, UnitsProduced, ScrapRate, DefectCount
                 )
                 SELECT 
-                    CAST(wo.enddate AS DATE),
+                    CAST(DATE_FORMAT(wo.enddate, '%Y%m%d') AS SIGNED),
                     p.ProductKey,
                     e.EmployeeKey,
                     ROUND(TIMESTAMPDIFF(SECOND, wo.startdate, wo.enddate) / 3600.0, 2),

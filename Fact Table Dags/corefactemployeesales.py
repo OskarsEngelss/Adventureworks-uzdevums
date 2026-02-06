@@ -25,7 +25,6 @@ def extract_transform_load_sales_data_into_factemployeesales_and_upload_to_starr
         proc_date = pendulum.now().to_date_string()
 
         # --- STEP 1: QUARANTINE ---
-        # Identifying rows that will fail the join or contain invalid metrics
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -59,7 +58,8 @@ def extract_transform_load_sales_data_into_factemployeesales_and_upload_to_starr
 
         try:
             # --- STEP 2: LOAD FACT TABLE ---
-            # Using a CTE to aggregate daily performance and joining with quota history
+            starrocks_hook.run("TRUNCATE TABLE adventureworks.FactEmployeeSales;")
+
             load_fact_sql = """
                 INSERT INTO adventureworks.FactEmployeeSales (
                     SalesDateKey, EmployeeKey, StoreKey, 
@@ -74,20 +74,26 @@ def extract_transform_load_sales_data_into_factemployeesales_and_upload_to_starr
                         COUNT(salesorderid) as ContactCount
                     FROM adventureworks_staging.stg_sales_salesorderheader
                     WHERE salespersonid IS NOT NULL
-                      AND totaldue >= 0 -- Only process valid amounts
+                      AND totaldue >= 0 
                     GROUP BY 1, 2, 3
                 )
                 SELECT 
-                    da.SalesDate,
+                    CAST(DATE_FORMAT(da.SalesDate, '%Y%m%d') AS SIGNED),
                     e.EmployeeKey,
-                    -1, -- Placeholder for StoreKey
-                    COALESCE(st.TerritoryKey, -1),
+                    -- JOIN to DimStore using the StoreID we just fixed in DimEmployee
+                    COALESCE(ds.StoreKey, 0) AS StoreKey, 
+                    COALESCE(st.TerritoryKey, 0) AS SalesTerritoryKey,
                     da.DailyTotal,
-                    COALESCE(dq.salesquota / 90, 0), -- Daily target based on quarterly quota
+                    COALESCE(dq.salesquota / 90, 0) AS SalesTarget, 
                     da.ContactCount
                 FROM DailyAgg da
                 INNER JOIN adventureworks.DimEmployee e 
-                    ON da.salespersonid = e.EmployeeID AND e.IsCurrent = 1
+                    ON da.salespersonid = e.EmployeeID 
+                    AND e.IsCurrent = 1
+                -- Bridge to DimStore to get the surrogate StoreKey
+                LEFT JOIN adventureworks.DimStore ds 
+                    ON e.StoreID = ds.StoreID 
+                    AND ds.IsCurrent = 1
                 LEFT JOIN adventureworks.DimSalesTerritory st 
                     ON da.territoryid = st.TerritoryID
                 LEFT JOIN adventureworks_staging.stg_sales_salespersonquotahistory dq 

@@ -71,8 +71,21 @@ def extract_transform_combine_vendor_data_into_dimvendor_and_upload_to_starrocks
                         cr.name AS Country,
                         v.creditrating AS VendorRating,
                         0.00 AS OnTimeDeliveryRate,
-                        v.creditrating * 20 AS QualityScore,
-                        'Standard' AS PaymentTerms,
+                        -- NEW DYNAMIC QUALITY SCORE LOGIC
+                        CASE 
+                            WHEN v.creditrating = 1 THEN 100 - (v.creditrating * 2)
+                            WHEN v.creditrating = 2 THEN 90 - (v.creditrating * 2)
+                            WHEN v.creditrating = 3 THEN 80 - (v.creditrating * 2)
+                            WHEN v.creditrating = 4 THEN 70 - (v.creditrating * 2)
+                            ELSE 60 - (v.creditrating * 2)
+                        END AS QualityScore,
+                        -- NEW DYNAMIC PAYMENT TERMS LOGIC
+                        CASE 
+                            WHEN v.creditrating = 1 THEN 'Net 60'
+                            WHEN v.creditrating = 2 THEN 'Net 45'
+                            WHEN v.creditrating = 3 THEN 'Net 30'
+                            ELSE 'Net 15'
+                        END AS PaymentTerms,
                         CASE WHEN v.activeflag = 1 THEN 'Active' ELSE 'Inactive' END AS VendorStatus,
                         CURRENT_DATE() AS SourceUpdateDate,
                         ROW_NUMBER() OVER(PARTITION BY v.businessentityid ORDER BY bea.addressid DESC) as rnk
@@ -127,8 +140,14 @@ def extract_transform_combine_vendor_data_into_dimvendor_and_upload_to_starrocks
                     '{proc_date}', s.VendorID, s.VendorName, s.ContactPerson,
                     s.Email, s.Phone, s.Address, s.City, s.Country, s.VendorRating,
                     s.OnTimeDeliveryRate, s.QualityScore, s.PaymentTerms, s.VendorStatus,
-                    NULL, TRUE, s.SourceUpdateDate
-                FROM adventureworks_staging.stg_dim_vendor_upsert s
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END, 
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END, 
+                    s.SourceUpdateDate
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY VendorID ORDER BY SourceUpdateDate DESC) as RowRank
+                    FROM adventureworks_staging.stg_dim_vendor_upsert
+                ) s
                 LEFT JOIN adventureworks.DimVendor d 
                     ON s.VendorID = d.VendorID AND d.IsCurrent = TRUE
                 WHERE d.VendorID IS NULL;

@@ -12,7 +12,7 @@
 - Note: Static reference table, no versioning needed
 
 CREATE TABLE DimDate (
-    DateKey INT PRIMARY KEY,
+    DateKey BIGINT NOT NULL,
     FullDate DATE,
     Year SMALLINT,
     Quarter TINYINT,
@@ -32,9 +32,9 @@ CREATE TABLE DimDate (
     FiscalMonth TINYINT,
     Season VARCHAR(20)
 )
-DUPLICATE KEY(DateKey)
+PRIMARY KEY (DateKey)
 DISTRIBUTED BY HASH(DateKey) BUCKETS 10
-PROPERTIES("replication_num" = "3");
+PROPERTIES("replication_num" = "1");
 
 
 
@@ -64,7 +64,7 @@ PROPERTIES("replication_num" = "3");
 - Merge Strategy: UPSERT with change detection on (Name, Email, City, Country, Segment, Status)
 
 CREATE TABLE DimCustomer (
-    CustomerKey INT NOT NULL,
+    CustomerKey BIGINT NOT NULL,
     ValidFromDate DATE NOT NULL,
     CustomerID INT NOT NULL,
     CustomerName VARCHAR(100),
@@ -132,7 +132,7 @@ PROPERTIES("replication_num" = "1");
 
 -- Old version without ReorderPoint and SafetyStockLevel
 CREATE TABLE DimProduct (
-    ProductKey INT NOT NULL,
+    ProductKey BIGINT NOT NULL,
     ValidFromDate DATE NOT NULL,
     ProductID INT NOT NULL,
     ProductName VARCHAR(100),
@@ -173,7 +173,7 @@ PROPERTIES("replication_num" = "1");
 
 -- New version with ReorderPoint and SafetyStockLevel
 CREATE TABLE DimProduct (
-    ProductKey INT NOT NULL,
+    ProductKey BIGINT NOT NULL,
     ValidFromDate DATE NOT NULL,
     ProductID INT NOT NULL,
     ProductName VARCHAR(100),
@@ -241,7 +241,7 @@ PROPERTIES("replication_num" = "1");
 - Merge Strategy: UPSERT with change detection on (Address, Region, Territory, Manager, Status)
 
 CREATE TABLE DimStore (
-    StoreKey INT,
+    StoreKey BIGINT,
     ValidFromDate DATE,
     StoreID INT,
     StoreName VARCHAR(100),
@@ -304,7 +304,7 @@ PROPERTIES("replication_num" = "1");
 
 -- Old version without StoreID
 CREATE TABLE DimEmployee (
-    EmployeeKey INT,
+    EmployeeKey BIGINT,
     ValidFromDate DATE,
     EmployeeID INT,
     EmployeeName VARCHAR(100),
@@ -341,7 +341,7 @@ PROPERTIES("replication_num" = "1");
 
 -- New version with StoreID
 CREATE TABLE DimEmployee (
-    EmployeeKey INT,
+    EmployeeKey BIGINT,
     ValidFromDate DATE,
     EmployeeID INT,
     StoreID INT,
@@ -397,7 +397,7 @@ PROPERTIES("replication_num" = "1");
 - If tracking promotion changes (SCD Type 2): Add ValidFromDate, ValidToDate, IsCurrent
 
 CREATE TABLE DimPromotion (
-    PromotionKey INT NOT NULL,
+    PromotionKey BIGINT NOT NULL,
     PromotionID INT NOT NULL,
     PromotionName VARCHAR(255),
     PromotionDescription VARCHAR(500),
@@ -442,7 +442,7 @@ PROPERTIES("replication_num" = "1");
 - Merge Strategy: UPSERT with change detection on (Rating, OnTimeDeliveryRate, QualityScore, Status)
 
 CREATE TABLE DimVendor (
-    VendorKey INT,
+    VendorKey BIGINT,
     ValidFromDate DATE,
     VendorID INT,
     VendorName VARCHAR(100),
@@ -494,7 +494,7 @@ PROPERTIES("replication_num" = "1");
   - CategoryDescription (TEXT)
 
 CREATE TABLE DimFeedbackCategory (
-    FeedbackCategoryKey INT,
+    FeedbackCategoryKey BIGINT,
     FeedbackCategoryID INT,
     CategoryName VARCHAR(50),
     CategoryDescription TEXT
@@ -513,7 +513,7 @@ PROPERTIES("replication_num" = "1");
   - ReturnReasonDescription (TEXT)
 
 CREATE TABLE DimReturnReason (
-    ReturnReasonKey INT,
+    ReturnReasonKey BIGINT,
     ReturnReasonID INT,
     ReturnReasonName VARCHAR(50),
     ReturnReasonDescription TEXT
@@ -537,13 +537,13 @@ PROPERTIES("replication_num" = "1");
   - **IsCurrent (BOOLEAN)**
 
 CREATE TABLE DimWarehouse (
-    WarehouseKey INT,
+    WarehouseKey BIGINT,
     ValidFromDate DATE,
     WarehouseID INT,
     WarehouseName VARCHAR(100),
     Location VARCHAR(100),
     WarehouseType VARCHAR(50),
-    ManagerKey INT,
+    ManagerKey BIGINT,
     ValidToDate DATE NULL,
     IsCurrent BOOLEAN
 )
@@ -579,7 +579,7 @@ PROPERTIES("replication_num" = "1");
   - SalesTarget (DECIMAL(18,2))
 
 CREATE TABLE DimSalesTerritory (
-    TerritoryKey INT,
+    TerritoryKey BIGINT,
     TerritoryID INT,
     TerritoryName VARCHAR(50),
     SalesRegion VARCHAR(50),
@@ -603,7 +603,7 @@ PROPERTIES("replication_num" = "1");
   - DiscountTierEnd (DECIMAL(5,2))
 
 CREATE TABLE DimCustomerSegment (
-    SegmentKey INT,
+    SegmentKey BIGINT,
     SegmentID INT,
     SegmentName VARCHAR(50),
     SegmentDescription TEXT,
@@ -625,7 +625,7 @@ PROPERTIES("replication_num" = "1");
   - MaxAgingDays (INTEGER)
 
 CREATE TABLE DimAgingTier (
-    AgingTierKey INT,
+    AgingTierKey BIGINT,
     AgingTierID INT,
     AgingTierName VARCHAR(50),
     MinAgingDays INT,
@@ -645,7 +645,7 @@ PROPERTIES("replication_num" = "1");
   - CategoryDescription (TEXT)
 
 CREATE TABLE DimFinanceCategory (
-    FinanceCategoryKey INT,
+    FinanceCategoryKey BIGINT,
     FinanceCategoryID INT,
     CategoryName VARCHAR(50),
     CategoryDescription TEXT
@@ -666,7 +666,7 @@ PROPERTIES("replication_num" = "1");
   - TimeZone (VARCHAR)
 
 CREATE TABLE DimRegion (
-    RegionKey INT,
+    RegionKey BIGINT,
     RegionID INT,
     RegionName VARCHAR(50),
     Country VARCHAR(50),
@@ -687,7 +687,7 @@ PROPERTIES("replication_num" = "1");
   - CategoryDescription (TEXT)
 
 CREATE TABLE DimProductCategory (
-    ProductCategoryKey INT,
+    ProductCategoryKey BIGINT,
     ProductCategoryID INT,
     CategoryName VARCHAR(50),
     CategoryDescription TEXT

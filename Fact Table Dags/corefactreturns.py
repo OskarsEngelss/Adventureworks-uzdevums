@@ -25,7 +25,6 @@ def extract_transform_load_returns_data_into_factreturns_and_upload_to_starrocks
         proc_date = pendulum.now().to_date_string()
 
         # 1. QUARANTINE: Check simulation integrity
-        # This catches any 'faked' returns that map to non-existent Dimensions
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -55,7 +54,6 @@ def extract_transform_load_returns_data_into_factreturns_and_upload_to_starrocks
 
         try:
             # 2. RELOAD FACT TABLE
-            # We truncate first because this is a simulation-based full-refresh
             starrocks_hook.run("TRUNCATE TABLE adventureworks.FactReturns;")
 
             load_fact_sql = """
@@ -83,7 +81,7 @@ def extract_transform_load_returns_data_into_factreturns_and_upload_to_starrocks
                 )
                 SELECT 
                     sr.ReturnID,
-                    sr.ReturnDate,
+                    CAST(DATE_FORMAT(sr.ReturnDate, '%Y%m%d') AS SIGNED),
                     dp.ProductKey,
                     dc.CustomerKey,
                     COALESCE(ds.StoreKey, 0),

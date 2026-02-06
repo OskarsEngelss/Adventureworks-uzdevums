@@ -71,11 +71,15 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                 FROM (
                     SELECT 
                         e.businessentityid AS EmployeeID,
-                        COALESCE(ss.businessentityid, -1) AS StoreID,
+                        COALESCE(ss_direct.businessentityid, st_map.MainStoreID, 0) AS StoreID,
                         CONCAT(p.firstname, ' ', p.lastname) AS EmployeeName,
                         e.jobtitle,
                         d.name AS Department,
-                        COALESCE(mgr.businessentityid, 0) AS ReportingManagerKey, 
+                        CASE 
+                            WHEN mgr.businessentityid IS NOT NULL 
+                            THEN murmur_hash3_32(CAST(mgr.businessentityid AS CHAR)) 
+                            ELSE 0 
+                        END AS ReportingManagerKey,
                         e.hiredate,
                         CASE WHEN e.currentflag = 1 THEN 'Active' ELSE 'Terminated' END AS EmployeeStatus,
                         st.`group` AS Region,
@@ -91,11 +95,18 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                         ON edh.departmentid = d.departmentid
                     LEFT JOIN adventureworks_staging.stg_sales_salesperson sp 
                         ON e.businessentityid = sp.businessentityid
-                    LEFT JOIN adventureworks_staging.stg_sales_store ss
-                        ON sp.businessentityid = ss.salespersonid
+                    LEFT JOIN adventureworks_staging.stg_sales_store ss_direct
+                        ON sp.businessentityid = ss_direct.salespersonid
+                    LEFT JOIN (
+                        SELECT 
+                            sc.territoryid, 
+                            ss.businessentityid AS MainStoreID,
+                            ROW_NUMBER() OVER(PARTITION BY sc.territoryid ORDER BY ss.modifieddate DESC) as r
+                        FROM adventureworks_staging.stg_sales_store ss
+                        JOIN adventureworks_staging.stg_sales_customer sc ON ss.businessentityid = sc.storeid
+                    ) st_map ON sp.territoryid = st_map.territoryid AND st_map.r = 1
                     LEFT JOIN adventureworks_staging.stg_sales_salesterritory st 
                         ON sp.territoryid = st.territoryid
-                    -- Hierarchy logic: Joins employee to their parent node in the org tree
                     LEFT JOIN adventureworks_staging.stg_humanresources_employee mgr 
                         ON e.organizationnode LIKE CONCAT(mgr.organizationnode, '%')
                         AND (LENGTH(e.organizationnode) - LENGTH(REPLACE(e.organizationnode, '/', ''))) = 
@@ -109,23 +120,25 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
             starrocks_hook.run(load_staging_sql)
 
             # --- STEP 3: SCD TYPE 2 EXPIRE ---
+            # Fixed: Use {yesterday} variable instead of hardcoded strings
             expire_sql = f"""
                 UPDATE adventureworks.DimEmployee
                 SET IsCurrent = FALSE, 
                     ValidToDate = '{yesterday}'
                 FROM adventureworks_staging.stg_dim_employee_upsert s
-                WHERE DimEmployee.EmployeeID = s.EmployeeID
-                AND DimEmployee.IsCurrent = TRUE 
+                WHERE adventureworks.DimEmployee.EmployeeID = s.EmployeeID
+                AND adventureworks.DimEmployee.IsCurrent = TRUE 
                 AND (
-                    DimEmployee.JobTitle != s.JobTitle OR 
-                    DimEmployee.Department != s.Department OR 
-                    DimEmployee.Territory != s.Territory OR 
-                    DimEmployee.StoreID != s.StoreID
+                    adventureworks.DimEmployee.JobTitle != s.JobTitle OR 
+                    adventureworks.DimEmployee.Department != s.Department OR 
+                    adventureworks.DimEmployee.Territory != s.Territory OR 
+                    adventureworks.DimEmployee.StoreID != s.StoreID
                 );
             """
             starrocks_hook.run(expire_sql)
 
             # --- STEP 4: SCD TYPE 2 INSERT ---
+            # Fixed: Use {proc_date} variable and stable key generation logic
             insert_sql = f"""
                 INSERT INTO adventureworks.DimEmployee (
                     EmployeeKey, ValidFromDate, EmployeeID, StoreID, EmployeeName, JobTitle, 
@@ -133,11 +146,18 @@ def extract_transform_combine_employee_data_into_dimemployee_and_upload_to_starr
                     Region, Territory, SalesQuota, ValidToDate, IsCurrent, SourceUpdateDate
                 )
                 SELECT 
-                    murmur_hash3_32(CONCAT(CAST(s.EmployeeID AS CHAR), '{proc_date}')),
+                    murmur_hash3_32(CAST(s.EmployeeID AS CHAR)),
                     '{proc_date}', s.EmployeeID, s.StoreID, s.EmployeeName, s.JobTitle,
                     s.Department, s.ReportingManagerKey, s.HireDate, s.EmployeeStatus,
-                    s.Region, s.Territory, s.SalesQuota, NULL, TRUE, s.SourceUpdateDate
-                FROM adventureworks_staging.stg_dim_employee_upsert s
+                    s.Region, s.Territory, s.SalesQuota, 
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END, 
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END, 
+                    s.SourceUpdateDate
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY EmployeeID ORDER BY SourceUpdateDate DESC, HireDate DESC) as RowRank
+                    FROM adventureworks_staging.stg_dim_employee_upsert
+                ) s
                 LEFT JOIN adventureworks.DimEmployee d ON s.EmployeeID = d.EmployeeID AND d.IsCurrent = TRUE
                 WHERE d.EmployeeID IS NULL;
             """

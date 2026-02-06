@@ -73,7 +73,7 @@ def extract_transform_load_purchases_data_into_factpurchases_and_upload_to_starr
                     PurchaseAmount, PurchaseQuantity, DiscountAmount, UnitCost
                 )
                 SELECT 
-                    CAST(h.orderdate AS DATE),
+                    CAST(DATE_FORMAT(h.orderdate, '%Y%m%d') AS SIGNED),
                     p.ProductKey,
                     v.VendorKey,
                     (d.unitprice * CAST(d.orderqty AS DECIMAL)),

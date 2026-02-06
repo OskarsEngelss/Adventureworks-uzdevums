@@ -13,7 +13,7 @@ STARROCKS_CONNECTION_ID = "starrocks_mysql"
     catchup=False,
     tags=["starrocks", "fact", "finance", "adventureworks"],
     default_args={
-        "retries": 1,
+        "retries": 1, 
         "retry_delay": datetime.timedelta(minutes=5),
     }
 )
@@ -25,7 +25,6 @@ def extract_transform_load_finance_data_into_factfinance_and_upload_to_starrocks
         proc_date = pendulum.now().to_date_string()
 
         # --- STEP 1: QUARANTINE ---
-        # Catching missing customers or invalid financial figures
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -54,7 +53,8 @@ def extract_transform_load_finance_data_into_factfinance_and_upload_to_starrocks
 
         try:
             # --- STEP 2: LOAD FACT TABLE ---
-            # Logic: Resolving Store via Customer Bridge and Category via online flag
+            starrocks_hook.run("TRUNCATE TABLE adventureworks.FactFinance;")
+
             load_fact_sql = """
                 INSERT INTO adventureworks.FactFinance (
                     InvoiceID, InvoiceDateKey, CustomerKey, StoreKey, 
@@ -63,9 +63,10 @@ def extract_transform_load_finance_data_into_factfinance_and_upload_to_starrocks
                 )
                 SELECT 
                     h.salesorderid,
-                    CAST(h.orderdate AS DATE),
+                    CAST(DATE_FORMAT(h.orderdate, '%Y%m%d') AS SIGNED),
                     dc.CustomerKey,
-                    COALESCE(ds.StoreKey, 0), -- 0 = No Store/Direct
+                    COALESCE(ds.StoreKey, 0),
+                    -- Use the key from the cross-joined subquery
                     dfc.FinanceCategoryKey,
                     h.totaldue,
                     DATEDIFF(COALESCE(h.shipdate, h.duedate), h.orderdate),
@@ -81,8 +82,13 @@ def extract_transform_load_finance_data_into_factfinance_and_upload_to_starrocks
                     ON h.customerid = sc.customerid
                 LEFT JOIN adventureworks.DimStore ds 
                     ON sc.storeid = ds.storeid AND ds.IsCurrent = 1
-                LEFT JOIN adventureworks.DimFinanceCategory dfc 
-                    ON h.onlineorderflag = dfc.FinanceCategoryID
+                -- This ensures EVERY row in the header gets the 'Invoice' Key
+                CROSS JOIN (
+                    SELECT FinanceCategoryKey 
+                    FROM adventureworks.DimFinanceCategory 
+                    WHERE CategoryName = 'Invoice' 
+                    LIMIT 1
+                ) dfc
                 WHERE h.totaldue >= 0;
             """
             starrocks_hook.run(load_fact_sql)

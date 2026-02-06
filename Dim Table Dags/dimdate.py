@@ -9,9 +9,9 @@ from airflow.providers.mysql.hooks.mysql import MySqlHook
 WAREHOUSE_DATABASE = "adventureworks"
 DIM_DATE_TABLE = "DimDate"
 
-# Date range for AdventureWorks (1990-2020)
+# Date range for AdventureWorks (1990-2029)
 DATE_RANGE_START = datetime.date(1990, 1, 1)
-DATE_RANGE_END = datetime.date(2020, 12, 31)
+DATE_RANGE_END = datetime.date(2029, 12, 31)
 
 # Holiday definitions (simplified - you'd want to expand this)
 HOLIDAYS = {

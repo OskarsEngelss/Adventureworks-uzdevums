@@ -21,7 +21,7 @@ def extract_transform_load_promotion_data_into_factpromotionresponse_and_upload_
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         proc_date = pendulum.now().to_date_string()
 
-        # 1. QUARANTINE: Identify and quarantine bad records
+        # 1. QUARANTINE
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -50,8 +50,7 @@ def extract_transform_load_promotion_data_into_factpromotionresponse_and_upload_
         starrocks_hook.run(quarantine_sql)
         
         try:
-            # 2. LOAD: Main load into FactPromotionResponse
-            # Using a CTE for the customer base to keep the uptake rate calculation clean
+            # 2. LOAD
             load_sql = """
                 INSERT INTO adventureworks.FactPromotionResponse (
                     PromotionDateKey, ProductKey, StoreKey, PromotionKey, 
@@ -61,9 +60,9 @@ def extract_transform_load_promotion_data_into_factpromotionresponse_and_upload_
                     SELECT COUNT(*) as total_cust FROM adventureworks.DimCustomer WHERE IsCurrent = 1
                 )
                 SELECT 
-                    CAST(h.orderdate AS DATE) as PromotionDateKey,
+                    CAST(DATE_FORMAT(h.orderdate, '%Y%m%d') AS SIGNED) as PromotionDateKey,
                     prod.ProductKey,
-                    COALESCE(ds.StoreKey, -1) as StoreKey, 
+                    COALESCE(ds.StoreKey, 0) as StoreKey, 
                     promo.PromotionKey,
                     SUM(d.unitprice * (1 - d.unitpricediscount) * CAST(d.orderqty AS DECIMAL)) as SalesDuringCampaign,
                     COUNT(d.salesorderdetailid) as DiscountUsageCount,

@@ -78,7 +78,7 @@ def extract_transform_load_sales_data_into_factsales_and_upload_to_starrocks():
                     FROM adventureworks.DimStore
                 )
                 SELECT 
-                    CAST(h.orderdate AS DATE),
+                    CAST(DATE_FORMAT(h.orderdate, '%Y%m%d') AS SIGNED),
                     c.CustomerKey,
                     p.ProductKey,
                     COALESCE(ds.StoreKey, fsv.StoreKey, 0), 

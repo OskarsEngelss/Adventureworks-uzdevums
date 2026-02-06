@@ -25,7 +25,6 @@ def extract_transform_load_inventory_data_into_factinventory_and_upload_to_starr
         proc_date = pendulum.now().to_date_string()
 
         # --- STEP 1: QUARANTINE ---
-        # Catching missing products, warehouses, or invalid quantities
         quarantine_sql = """
             INSERT INTO adventureworks_errors.error_records (
                 ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
@@ -59,16 +58,17 @@ def extract_transform_load_inventory_data_into_factinventory_and_upload_to_starr
 
         try:
             # --- STEP 2: LOAD FACT TABLE ---
-            # Using INNER JOINs to ensure only valid, joined data enters the fact
+            starrocks_hook.run("TRUNCATE TABLE adventureworks.FactInventory;")
+
             load_fact_sql = """
                 INSERT INTO adventureworks.FactInventory (
                     InventoryDateKey, ProductKey, StoreKey, WarehouseKey, 
                     QuantityOnHand, StockAgingDays, ReorderLevel, SafetyStock
                 )
                 SELECT 
-                    CURRENT_DATE(), 
+                    CAST(DATE_FORMAT(CURRENT_DATE(), '%Y%m%d') AS SIGNED), 
                     p.ProductKey,
-                    0, -- Placeholder for StoreKey (Inventory is Warehouse-based)
+                    0, 
                     w.WarehouseKey,
                     CAST(s.quantity AS INT),
                     DATEDIFF(CURRENT_DATE(), s.modifieddate),

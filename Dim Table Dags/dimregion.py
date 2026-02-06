@@ -24,54 +24,47 @@ def extract_transform_combine_region_data_into_dimregion_and_upload_to_starrocks
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         proc_date = pendulum.now().to_date_string()
 
-        # --- STEP 1: QUARANTINE (Check against the manual source) ---
-        quarantine_sql = """
-            INSERT INTO adventureworks_errors.error_records (
-                ErrorDate, SourceTable, RecordNaturalKey, FailureReason, 
-                IsRecoverable, RetryCount, IsResolved, FailedData
-            )
-            SELECT 
-                CURRENT_TIMESTAMP(),
-                'DimRegion',
-                COALESCE(CAST(stg.territoryid AS CHAR), 'UNKNOWN'),
-                'Missing Region Data',
-                1, 0, 0,
-                json_object(
-                    'regionid', CAST(stg.territoryid AS CHAR), 
-                    'name', stg.name
-                )
-            FROM adventureworks_staging.stg_sales_salesterritory stg
-            WHERE stg.territoryid IS NULL OR stg.name IS NULL;
-        """
-        starrocks_hook.run(quarantine_sql)
-
         try:
-            # --- STEP 2: TRANSFORM & LOAD TO STAGING ---
-            # Using your manual enrichment logic to add Continent and TimeZone
-            starrocks_hook.run("TRUNCATE TABLE adventureworks_staging.stg_dim_region_upsert;")
+            # --- STEP 1: QUARANTINE ---
+            check_sql = "SELECT COUNT(*) FROM adventureworks_staging.stg_sales_salesterritory"
+            count = starrocks_hook.get_first(check_sql)[0]
             
+            if count == 0:
+                raise ValueError("Source staging table stg_sales_salesterritory is empty. Aborting load.")
+
+            # --- STEP 2: TRANSFORM & LOAD TO STAGING ---
+            starrocks_hook.run("DELETE FROM adventureworks_staging.stg_dim_region_upsert WHERE RegionID IS NOT NULL;")
+
+            # Joining with countryregion to get full names + Mapping TimeZones
             load_staging_sql = """
-                INSERT INTO adventureworks_staging.stg_dim_region_upsert
+                INSERT INTO adventureworks_staging.stg_dim_region_upsert (
+                    RegionID, RegionName, Country, Continent, TimeZone, SourceUpdateDate
+                )
                 SELECT 
-                    RegionID, RegionName, Country, Continent, TimeZone, 
+                    t.territoryid AS RegionID,
+                    t.name AS RegionName,
+                    c.name AS Country,
+                    t.`group` AS Continent,
+                    CASE 
+                        WHEN t.name = 'Northwest' THEN 'PST'
+                        WHEN t.name = 'Southwest' THEN 'MST'
+                        WHEN t.name = 'Central' THEN 'CST'
+                        WHEN t.name IN ('Northeast', 'Southeast', 'Canada') THEN 'EST'
+                        WHEN t.`group` = 'Europe' THEN 'CET'
+                        WHEN t.name = 'United Kingdom' THEN 'GMT'
+                        WHEN t.name = 'Australia' THEN 'AEST'
+                        ELSE 'UTC'
+                    END AS TimeZone,
                     CURRENT_DATE() AS SourceUpdateDate
-                FROM (
-                    SELECT 1 as RegionID, 'Northwest' as RegionName, 'United States' as Country, 'North America' as Continent, 'PST' as TimeZone
-                    UNION ALL SELECT 2, 'Northeast', 'United States', 'North America', 'EST'
-                    UNION ALL SELECT 3, 'Central', 'United States', 'North America', 'CST'
-                    UNION ALL SELECT 4, 'Southwest', 'United States', 'North America', 'MST'
-                    UNION ALL SELECT 5, 'Southeast', 'United States', 'North America', 'EST'
-                    UNION ALL SELECT 6, 'Canada', 'Canada', 'North America', 'EST'
-                    UNION ALL SELECT 7, 'France', 'France', 'Europe', 'CET'
-                    UNION ALL SELECT 8, 'Germany', 'Germany', 'Europe', 'CET'
-                    UNION ALL SELECT 9, 'Australia', 'Australia', 'Pacific', 'AEST'
-                    UNION ALL SELECT 10, 'United Kingdom', 'United Kingdom', 'Europe', 'GMT'
-                ) src;
+                FROM adventureworks_staging.stg_sales_salesterritory t
+                LEFT JOIN adventureworks_staging.stg_person_countryregion c 
+                    ON t.countryregioncode = c.countryregioncode
+                UNION ALL
+                SELECT 0, 'Online', 'Online', 'Online', 'UTC', CURRENT_DATE();
             """
             starrocks_hook.run(load_staging_sql)
 
             # --- STEP 3: UPSERT Logic (SCD Type 1) ---
-            # We truncate DimRegion first to ensure it's a clean reference table
             starrocks_hook.run("TRUNCATE TABLE adventureworks.DimRegion;")
 
             upsert_sql = """
@@ -79,7 +72,10 @@ def extract_transform_combine_region_data_into_dimregion_and_upload_to_starrocks
                     RegionKey, RegionID, RegionName, Country, Continent, TimeZone
                 )
                 SELECT 
-                    murmur_hash3_32(CAST(s.RegionID AS CHAR)) AS RegionKey,
+                    CASE 
+                        WHEN s.RegionID = 0 THEN 0 
+                        ELSE murmur_hash3_32(CAST(s.RegionID AS CHAR)) 
+                    END AS RegionKey,
                     s.RegionID, s.RegionName, s.Country, s.Continent, s.TimeZone
                 FROM adventureworks_staging.stg_dim_region_upsert s;
             """
@@ -90,7 +86,7 @@ def extract_transform_combine_region_data_into_dimregion_and_upload_to_starrocks
                 hook=starrocks_hook,
                 source_table="DimRegion",
                 natural_key="BATCH_" + proc_date,
-                error=e,
+                error=str(e),
                 failed_data="Batch failure during synchronize_postgresql_to_starrocks"
             )
             raise

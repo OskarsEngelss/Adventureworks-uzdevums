@@ -55,7 +55,7 @@ L5_DAGS = [
 
 with DAG(
     dag_id="master_adventureworks_orchestrator",
-    schedule="0 4 * * *", 
+    schedule=None,
     start_date=pendulum.datetime(2026, 1, 1, tz="Europe/Tallinn"),
     catchup=False,
     tags=["orchestration", "adventureworks", "full_load"],

@@ -53,20 +53,23 @@ def extract_transform_combine_product_data_into_dimproduct_and_upload_to_starroc
             starrocks_hook.run("DELETE FROM adventureworks_staging.stg_dim_product_upsert WHERE ProductID IS NOT NULL;")
 
             # 2. TRANSFORM & LOAD (Capitalized Cost and ListPrice)
-            load_staging_sql = f"""
-                INSERT INTO adventureworks_staging.stg_dim_product_upsert
+            load_staging_sql = """
+                INSERT INTO adventureworks_staging.stg_dim_product_upsert (
+                    ProductID, ProductName, SKU, Category, SubCategory, 
+                    Brand, ListPrice, Cost, ProductStatus, Color, Size, Weight,
+                    ReorderPoint, SafetyStockLevel, SourceUpdateDate
+                )
                 SELECT 
                     p.productid AS ProductID,
                     p.name AS ProductName,
                     p.productnumber AS SKU,
-                    pc.CategoryName AS Category,
-                    ps.name AS SubCategory,
-                    pm.name AS Brand,
+                    COALESCE(pc.name, 'Component') AS Category, -- Fix: Map NULL Category
+                    COALESCE(ps.name, 'Non-Saleable') AS SubCategory, -- Fix: Map NULL SubCategory
+                    COALESCE(p.name, 'Generic') AS Brand,
                     p.listprice AS ListPrice,
                     p.standardcost AS Cost,
                     CASE 
-                        WHEN p.sellenddate IS NOT NULL AND p.sellenddate <= CURRENT_DATE() THEN 'Discontinued'
-                        WHEN p.sellstartdate > CURRENT_DATE() THEN 'Coming Soon'
+                        WHEN p.sellenddate IS NOT NULL THEN 'Discontinued'
                         ELSE 'Active'
                     END AS ProductStatus,
                     p.color AS Color,
@@ -74,15 +77,15 @@ def extract_transform_combine_product_data_into_dimproduct_and_upload_to_starroc
                     p.weight AS Weight,
                     p.reorderpoint AS ReorderPoint,
                     p.safetystocklevel AS SafetyStockLevel,
-                    CURRENT_DATE() as SourceUpdateDate
+                    CURRENT_DATE() AS SourceUpdateDate
                 FROM adventureworks_staging.stg_production_product p
                 LEFT JOIN adventureworks_staging.stg_production_productsubcategory ps 
                     ON p.productsubcategoryid = ps.productsubcategoryid
-                LEFT JOIN DimProductCategory pc 
+                LEFT JOIN adventureworks_staging.stg_production_productcategory pc 
                     ON ps.productcategoryid = pc.productcategoryid
-                LEFT JOIN adventureworks_staging.stg_production_productmodel pm 
-                    ON p.productmodelid = pm.productmodelid
-                WHERE p.productid IS NOT NULL AND p.listprice >= 0 AND p.standardcost <= p.listprice;
+                UNION ALL
+                -- Handling the Unknown/Manual Record (Ensuring Category is not NULL here either)
+                SELECT 0, 'Unknown Product', 'N/A', 'Unknown', 'Unknown', 'N/A', 0, 0, 'Active', NULL, NULL, NULL, NULL, NULL, CURRENT_DATE();
             """
             starrocks_hook.run(load_staging_sql)
 
@@ -108,22 +111,32 @@ def extract_transform_combine_product_data_into_dimproduct_and_upload_to_starroc
 
             # 4. INSERT logic (Capitalized Cost and ListPrice)
             insert_sql = f"""
-                INSERT INTO DimProduct (
-                    ProductKey, ProductID, ProductName, SKU, Category, SubCategory, 
+                INSERT INTO adventureworks.DimProduct (
+                    ProductKey, ProductID, ProductName, SKU, Category, SubCategory,
                     Brand, ListPrice, Cost, ProductStatus, Color, Size, Weight,
                     ReorderPoint, SafetyStockLevel,
                     ValidFromDate, ValidToDate, IsCurrent, 
                     SourceUpdateDate, EffectiveStartDate, EffectiveEndDate
                 )
                 SELECT 
-                    murmur_hash3_32(CONCAT(CAST(s.ProductID AS CHAR), '{proc_date}')),
+                    CASE 
+                        WHEN s.ProductID = 0 THEN 0 
+                        ELSE murmur_hash3_32(CONCAT(CAST(s.ProductID AS CHAR), '{proc_date}')) 
+                    END AS ProductKey,
                     s.ProductID, s.ProductName, s.SKU, s.Category, s.SubCategory,
                     s.Brand, s.ListPrice, s.Cost, s.ProductStatus, s.Color, s.Size, s.Weight,
                     s.ReorderPoint, s.SafetyStockLevel,
-                    '{proc_date}', NULL, TRUE, 
-                    s.SourceUpdateDate, '{proc_date}', NULL
-                FROM adventureworks_staging.stg_dim_product_upsert s
-                LEFT JOIN DimProduct d ON s.ProductID = d.ProductID AND d.IsCurrent = TRUE
+                    '{proc_date}', 
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END, 
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END, 
+                    s.SourceUpdateDate, '{proc_date}', 
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY ProductID ORDER BY SourceUpdateDate DESC) as RowRank
+                    FROM adventureworks_staging.stg_dim_product_upsert
+                ) s
+                LEFT JOIN adventureworks.DimProduct d ON s.ProductID = d.ProductID AND d.IsCurrent = TRUE
                 WHERE d.ProductID IS NULL;
             """
             starrocks_hook.run(insert_sql)

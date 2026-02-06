@@ -90,7 +90,17 @@ def extract_transform_combine_customer_data_into_dimcustomer_and_upload_to_starr
                     sp.name as StateProvince,
                     cr.name as Country,
                     a.postalcode,
-                    COALESCE(seg.SegmentName, 'Budget') AS CustomerSegment,
+                    -- FIXED: Using only names found in your DimCustomerSegment table
+                    CASE 
+                        -- Long-term international customers are boosted to VIP
+                        WHEN cr.name != 'United States' AND COALESCE(TIMESTAMPDIFF(YEAR, stats.FirstPurchaseDate, CURRENT_DATE()), 0) > 10 
+                            THEN 'VIP'
+                        -- High lifetime spenders in the US are boosted to Premium
+                        WHEN cr.name = 'United States' AND stats.TotalLifetimeSpend > 50000 
+                            THEN 'Premium'
+                        -- Fallback to your existing table-based segmentation logic
+                        ELSE COALESCE(seg.SegmentName, 'Budget') 
+                    END AS CustomerSegment,
                     CASE WHEN cb.storeid IS NOT NULL THEN 'Corporate' ELSE 'Individual' END as CustomerType,
                     'Active' as AccountStatus, 
                     0.00 as CreditLimit, 
@@ -99,6 +109,7 @@ def extract_transform_combine_customer_data_into_dimcustomer_and_upload_to_starr
                     CURRENT_DATE() as SourceUpdateDate
                 FROM CustomerBase cb
                 LEFT JOIN CustomerSalesStats stats ON cb.customerid = stats.customerid
+                -- Join for spend-based segmentation fallback
                 LEFT JOIN adventureworks.DimCustomerSegment seg 
                     ON stats.TotalLifetimeSpend >= (seg.DiscountTierStart * 10000)
                    AND stats.TotalLifetimeSpend < (seg.DiscountTierEnd * 10000)
@@ -137,22 +148,29 @@ def extract_transform_combine_customer_data_into_dimcustomer_and_upload_to_starr
                     SourceUpdateDate, EffectiveStartDate, EffectiveEndDate
                 )
                 SELECT 
-                    murmur_hash3_32(CONCAT(CAST(s.CustomerID AS CHAR), '{proc_date}')),
-                    '{proc_date}', s.CustomerID, s.CustomerName, s.Email, s.Phone, s.City, 
+                    -- Unique Surrogate Key per version
+                    murmur_hash3_32(CONCAT(CAST(s.CustomerID AS CHAR), CAST(s.SourceUpdateDate AS VARCHAR))),
+                    s.SourceUpdateDate, 
+                    s.CustomerID, s.CustomerName, s.Email, s.Phone, s.City, 
                     s.StateProvince, s.Country, s.PostalCode, s.CustomerSegment, s.CustomerType, 
                     s.AccountStatus, s.CreditLimit, s.AnnualIncome, s.YearsSinceFirstPurchase, 
-                    NULL, TRUE, s.SourceUpdateDate, '{proc_date}', NULL
-                FROM adventureworks_staging.stg_dim_customer_upsert s
-                LEFT JOIN adventureworks.DimCustomer d ON s.CustomerID = d.CustomerID AND d.IsCurrent = TRUE
-                WHERE NOT EXISTS (
-                    SELECT 1 FROM adventureworks.DimCustomer check_d 
-                    WHERE check_d.CustomerID = s.CustomerID 
-                    AND check_d.IsCurrent = TRUE
-                    -- This ensures we only skip if the current record is IDENTICAL to staging
-                    AND check_d.Email = s.Email 
-                    AND check_d.City = s.City 
-                    AND check_d.CustomerSegment = s.CustomerSegment
-                )
+                    -- If not the latest version, expire it immediately
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END, 
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END, 
+                    s.SourceUpdateDate, 
+                    s.SourceUpdateDate, 
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY CustomerID 
+                               ORDER BY SourceUpdateDate DESC, YearsSinceFirstPurchase DESC
+                           ) as RowRank
+                    FROM adventureworks_staging.stg_dim_customer_upsert
+                ) s
+                LEFT JOIN adventureworks.DimCustomer d 
+                    ON s.CustomerID = d.CustomerID AND d.IsCurrent = TRUE
+                WHERE d.CustomerID IS NULL;
             """
             starrocks_hook.run(insert_sql)
 

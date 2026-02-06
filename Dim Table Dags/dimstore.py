@@ -105,7 +105,7 @@ def extract_transform_combine_store_data_into_dimstore_and_upload_to_starrocks()
             """
             starrocks_hook.run(expire_sql)
 
-            # --- STEP 4: SCD TYPE 2 INSERT ---
+            # --- STEP 4: SCD TYPE 2 INSERT
             insert_sql = """
                 INSERT INTO adventureworks.DimStore (
                     StoreKey, ValidFromDate, StoreID, StoreName, StoreNumber, 
@@ -114,13 +114,20 @@ def extract_transform_combine_store_data_into_dimstore_and_upload_to_starrocks()
                     OpeningDate, SquareFootage, ValidToDate, IsCurrent, SourceUpdateDate
                 )
                 SELECT 
-                    murmur_hash3_32(CONCAT(CAST(s.StoreID AS CHAR), CAST(s.OpeningDate AS VARCHAR))),
+                    murmur_hash3_32(CONCAT(CAST(s.StoreID AS CHAR), CAST(s.SourceUpdateDate AS VARCHAR))),
                     s.OpeningDate,
                     s.StoreID, s.StoreName, s.StoreNumber,
                     s.Address, s.City, s.StateProvince, s.Country, s.PostalCode,
                     s.Region, s.Territory, s.StoreType, s.StoreStatus, s.ManagerName,
-                    s.OpeningDate, s.SquareFootage, NULL, TRUE, s.SourceUpdateDate
-                FROM adventureworks_staging.stg_dim_store_upsert s
+                    s.OpeningDate, s.SquareFootage, 
+                    CASE WHEN s.RowRank = 1 THEN NULL ELSE s.SourceUpdateDate END, -- Expire old ones
+                    CASE WHEN s.RowRank = 1 THEN TRUE ELSE FALSE END,             -- Only rank 1 is current
+                    s.SourceUpdateDate
+                FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY StoreID ORDER BY SourceUpdateDate DESC, OpeningDate DESC) as RowRank
+                    FROM adventureworks_staging.stg_dim_store_upsert
+                ) s
                 LEFT JOIN adventureworks.DimStore d 
                     ON s.StoreID = d.StoreID AND d.IsCurrent = TRUE
                 WHERE d.StoreID IS NULL;
