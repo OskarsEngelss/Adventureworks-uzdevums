@@ -63,7 +63,7 @@ def extract_transform_combine_product_data_into_dimproduct_and_upload_to_starroc
                     p.productid AS ProductID,
                     p.name AS ProductName,
                     p.productnumber AS SKU,
-                    COALESCE(pc.name, 'Component') AS Category, -- Fix: Map NULL Category
+                    COALESCE(pc.name, 'Components') AS Category, -- Fix: Map NULL Category
                     COALESCE(ps.name, 'Non-Saleable') AS SubCategory, -- Fix: Map NULL SubCategory
                     COALESCE(p.name, 'Generic') AS Brand,
                     p.listprice AS ListPrice,
