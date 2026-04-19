@@ -127,7 +127,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_daily_sales_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    SalesDateKey DATE,
+    SalesDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)
@@ -141,7 +141,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_weekly_sales_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    WeekStartDateKey DATE,
+    WeekStartDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)
@@ -155,7 +155,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_monthly_sales_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    MonthStartDateKey DATE,
+    MonthStartDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)
@@ -169,7 +169,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_daily_inventory_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    InventoryDateKey DATE,
+    InventoryDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)
@@ -183,7 +183,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_monthly_product_performance_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    MonthStartDateKey DATE,
+    MonthStartDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)
@@ -197,7 +197,7 @@ PROPERTIES("replication_num" = "1");
 
 CREATE TABLE adventureworks_errors.agg_regional_sales_errors (
     ErrorID BIGINT AUTO_INCREMENT,
-    MonthStartDateKey DATE,
+    MonthStartDateKey BIGINT,
     FailureReason VARCHAR(255),
     FailedAt DATETIME,
     SQLState VARCHAR(20)

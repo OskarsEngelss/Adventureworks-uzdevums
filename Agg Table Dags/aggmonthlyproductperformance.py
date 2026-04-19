@@ -23,8 +23,8 @@ def update_agg_monthly_product_performance():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         
         try:
-            # 1. FIND LATEST MONTH FROM SALES
-            date_query = "SELECT DATE_TRUNC('month', MAX(SalesDateKey)) FROM FactSales;"
+            # 1. FIND LATEST MONTH FROM SALES (Pārveidots uz BIGINT mēneša sākumu)
+            date_query = "SELECT MAX(SalesDateKey / 100 * 100 + 1) FROM FactSales;"
             res = starrocks_hook.get_first(date_query)
             target_month = res[0]
             
@@ -34,8 +34,8 @@ def update_agg_monthly_product_performance():
 
             print(f"Aggregating Product Performance for: {target_month}")
 
-            # 2. IDEMPOTENT DELETE
-            starrocks_hook.run(f"DELETE FROM agg_monthly_product_performance WHERE MonthStartDateKey = '{target_month}';")
+            # 2. IDEMPOTENT DELETE (Pēdiņas noņemtas)
+            starrocks_hook.run(f"DELETE FROM agg_monthly_product_performance WHERE MonthStartDateKey = {target_month};")
 
             # 3. INSERT MULTI-FACT AGGREGATION
             load_sql = f"""
@@ -45,36 +45,35 @@ def update_agg_monthly_product_performance():
                 )
                 WITH MonthlySales AS (
                     SELECT 
-                        DATE_TRUNC('month', SalesDateKey) as MonthKey,
+                        (SalesDateKey / 100 * 100 + 1) as MonthKey,
                         ProductKey,
                         StoreKey,
-                        CustomerKey, -- Keep this for joining feedback
+                        CustomerKey,
                         SUM(SalesRevenue) as Revenue,
                         SUM(QuantitySold) as SoldQty
                     FROM FactSales
-                    WHERE DATE_TRUNC('month', SalesDateKey) = '{target_month}'
+                    WHERE (SalesDateKey / 100 * 100 + 1) = {target_month}
                     GROUP BY 1, 2, 3, 4
                 ),
                 MonthlyReturns AS (
                     SELECT 
-                        DATE_TRUNC('month', ReturnDateKey) as MonthKey,
+                        (ReturnDateKey / 100 * 100 + 1) as MonthKey,
                         ProductKey,
                         StoreKey,
                         SUM(ReturnedQuantity) as ReturnedQty
                     FROM FactReturns
-                    WHERE DATE_TRUNC('month', ReturnDateKey) = '{target_month}'
+                    WHERE (ReturnDateKey / 100 * 100 + 1) = {target_month}
                     GROUP BY 1, 2, 3
                 ),
                 MonthlyFeedback AS (
-                    -- Bridge Feedback to Products via the CustomerKey
                     SELECT 
-                        DATE_TRUNC('month', f.FeedbackDateKey) as MonthKey,
+                        (f.FeedbackDateKey / 100 * 100 + 1) as MonthKey,
                         s.ProductKey,
                         AVG(f.FeedbackScore) as RatingScore
                     FROM FactCustomerFeedback f
                     JOIN FactSales s ON f.CustomerKey = s.CustomerKey 
-                        AND DATE_TRUNC('month', f.FeedbackDateKey) = DATE_TRUNC('month', s.SalesDateKey)
-                    WHERE DATE_TRUNC('month', f.FeedbackDateKey) = '{target_month}'
+                        AND (f.FeedbackDateKey / 100 * 100 + 1) = (s.SalesDateKey / 100 * 100 + 1)
+                    WHERE (f.FeedbackDateKey / 100 * 100 + 1) = {target_month}
                     GROUP BY 1, 2
                 ),
                 FinalAgg AS (
@@ -84,9 +83,7 @@ def update_agg_monthly_product_performance():
                         ms.StoreKey,
                         SUM(ms.Revenue) as TotalRevenue,
                         SUM(ms.SoldQty) as TotalUnits,
-                        -- Join Returns
                         COALESCE(MAX(mr.ReturnedQty), 0) as ReturnedQty,
-                        -- Join Feedback
                         COALESCE(MAX(mf.RatingScore), 0) as Rating
                     FROM MonthlySales ms
                     LEFT JOIN MonthlyReturns mr 
@@ -113,11 +110,12 @@ def update_agg_monthly_product_performance():
 
         except Exception as e:
             error_msg = str(e).replace("'", '"')
-            err_month = target_month if 'target_month' in locals() and target_month else '1900-01-01'
+            # Ja target_month nav, lietojam skaitlisku noklusējuma vērtību
+            err_month = target_month if 'target_month' in locals() and target_month else 19000101
             starrocks_hook.run(f"""
                 INSERT INTO adventureworks_errors.agg_monthly_product_performance_errors 
                 (MonthStartDateKey, FailureReason, FailedAt) 
-                VALUES ('{err_month}', 
+                VALUES ({err_month}, 
                         'Product Agg Failure: {error_msg[:200]}', NOW())
             """)
             raise

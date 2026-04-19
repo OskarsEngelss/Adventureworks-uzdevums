@@ -1,0 +1,525 @@
+DAX formulas:
+_MeasuresCustomer:
+	Active Customers = CALCULATE(DISTINCTCOUNT(FactSales[CustomerKey]), USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey]))
+
+	Avg LTV = DIVIDE([Net Revenue], [Unique Customers Count], 0)
+
+	Customer Lifetime Value = 
+	DIVIDE(
+    		[Total Revenue], 
+    		[Unique Customers Count], 
+    		0
+	)
+
+	Customers (List) = CALCULATE(DISTINCT(FactSales[CustomerKey]), USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey]))
+
+	Customers Current Month = 
+	CALCULATE(
+		DISTINCT(FactSales[CustomerKey]), 
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	First Purchase Date = CALCULATE(MIN(DimDate[FullDate]), ALL(DimDate), USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey]))
+	
+	Frequency = COUNTROWS(FactSales)
+	Last Purchase Date = 
+	VAR LastKey = 
+		CALCULATE(
+			MAX(FactSales[SalesDateKey]),
+			USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+		)
+	RETURN
+		IF(
+			ISBLANK(LastKey), 
+			BLANK(),
+			DATE(LEFT(LastKey, 4), MID(LastKey, 5, 2), RIGHT(LastKey, 2))
+		)
+	
+	New Customers = COUNTROWS(FILTER(VALUES(FactSales[CustomerKey]), [First Purchase Date] IN VALUES(DimDate[FullDate])))
+	
+	Prior Month Customers (List) = CALCULATE([Customers (List)], DATEADD(DimDate[FullDate], -1, MONTH))
+	
+	Retention % = 
+	VAR PriorCount = 
+		CALCULATE(
+			DISTINCTCOUNT(FactSales[CustomerKey]),
+			DATEADD(DimDate[FullDate], -1, MONTH),
+			USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+		)
+	RETURN
+		DIVIDE([Returning Customers Count], PriorCount, 0)
+	
+	Returning Customers Count = 
+	VAR CurrentCustomers = 
+		CALCULATETABLE(
+			VALUES(FactSales[CustomerKey]),
+			USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+		)
+	VAR PriorCustomers = 
+		CALCULATETABLE(
+			VALUES(FactSales[CustomerKey]),
+			DATEADD(DimDate[FullDate], -1, MONTH),
+			USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+		)
+	RETURN
+		COUNTROWS(
+			FILTER(CurrentCustomers, [CustomerKey] IN PriorCustomers)
+		)
+
+
+_MeasuresCustomerFeedback:
+	Avg CSAT Score = CALCULATE(AVERAGE(FactCustomerFeedback[CSATScore]), USERELATIONSHIP(FactCustomerFeedback[FeedbackDateKey], DimDate[DateKey]))
+
+	Avg Feedback Score = 
+	CALCULATE(
+		AVERAGE(FactCustomerFeedback[FeedbackScore]), 
+		USERELATIONSHIP(FactCustomerFeedback[FeedbackDateKey], DimDate[DateKey])
+	)
+
+	Avg Resolution Time Hours = AVERAGE(FactCustomerFeedback[ResolutionTimeHours])
+
+	Response Rate % = 
+	VAR FeedbackCount = COUNTROWS(FactCustomerFeedback)
+	RETURN 
+	DIVIDE(FeedbackCount, [Active Customers], 0)
+
+	Total Complaints = SUM(FactCustomerFeedback[ComplaintCount])
+
+	Total Customer Feedback Count = COUNTROWS(FactCustomerFeedback)
+
+
+_MeasuresEmployeeSales:
+	Employee Quota Attainment % = 
+	VAR TotalQuota = SUM(DimEmployee[SalesQuota])
+	RETURN
+	ROUND(
+		DIVIDE([Net Revenue], TotalQuota, 0) * 100, 
+		2
+	)
+
+	Quota Attainment % = DIVIDE([Net Revenue], [Total Sales Target], 0)
+
+	Revenue per Employee = DIVIDE([Net Revenue], [Total Employees], 0)
+
+	Sales Per Employee = DIVIDE([Net Revenue], [Total Employees Active], 0)
+
+	Sales Target vs Actual % = 
+	VAR Actual = SUM(FactEmployeeSales[SalesAmount])
+	VAR Target = SUM(FactEmployeeSales[SalesTarget])
+	RETURN
+	DIVIDE(Actual, Target, 0) * 100
+
+	Total Employees = 
+	CALCULATE(
+		COUNTROWS(DimEmployee),
+		DimEmployee[SalesQuota] > 0
+	)
+
+	Total Employees Active = DISTINCTCOUNT(FactSales[EmployeeKey])
+
+	Total Sales Target = 
+	CALCULATE(
+		SUM(FactEmployeeSales[SalesTarget]),
+		USERELATIONSHIP(FactEmployeeSales[SalesDateKey], DimDate[DateKey])
+	)
+
+
+_MeasuresFinance:
+	Avg Payment Delay Days = AVERAGE(FactFinance[PaymentDelayDays])
+
+	DSO = 
+	VAR TotalReceivables = SUM(FactFinance[InvoiceAmount])
+	VAR DaysInPeriod = COUNTROWS(DimDate)
+	RETURN
+	DIVIDE(TotalReceivables, [Total Invoiced], 0) * DaysInPeriod
+
+	Net Invoice Amount = [Total Invoiced] - [Total Interest Charges]
+
+	On Time Payment % = 
+	DIVIDE(
+		CALCULATE(COUNTROWS(FactFinance), FactFinance[PaymentDelayDays] <= 0), 
+		COUNTROWS(FactFinance), 
+		0
+	)
+
+	Total Credit Usage = SUM(FactFinance[CreditUsage])
+
+	Total Interest Charges = SUM(FactFinance[InterestCharges])
+
+	Total Invoiced = 
+	CALCULATE(
+		SUM(FactFinance[InvoiceAmount]),
+		USERELATIONSHIP(FactFinance[InvoiceDateKey], DimDate[DateKey])
+	)
+
+
+_MeasuresInventory:
+	Avg Stock Age Days = 
+	CALCULATE(
+		AVERAGE(FactInventory[StockAgingDays]),
+		USERELATIONSHIP(FactInventory[InventoryDateKey], DimDate[DateKey])
+	)
+
+	Critical Items = 
+	CALCULATE(
+		COUNTROWS(
+			FILTER(
+				DimProduct,
+				[Total Inventory Quantity] < DimProduct[ReorderPoint]
+			)
+		),
+		USERELATIONSHIP(FactInventory[InventoryDateKey], DimDate[DateKey])
+	)
+
+	Inventory Value (cost) = 
+	ROUND(
+		SUMX(FactInventory, FactInventory[QuantityOnHand] * RELATED(DimProduct[Cost])), 
+		2
+	)
+
+	Inventory Value (list) = 
+	ROUND(
+		SUMX(FactInventory, FactInventory[QuantityOnHand] * RELATED(DimProduct[ListPrice])), 
+		2
+	)
+
+	Total Inventory Quantity = CALCULATE(SUM(FactInventory[QuantityOnHand]), USERELATIONSHIP(FactInventory[InventoryDateKey], DimDate[DateKey]))
+
+
+_MeasuresProduction:
+	Avg Scrap Rate % = 
+	CALCULATE(
+		AVERAGE(FactProduction[ScrapRate]), 
+		USERELATIONSHIP(FactProduction[ProductionDateKey], DimDate[DateKey])
+	)
+
+	Defect Rate % = 
+	ROUND(
+		DIVIDE([Total Defects], [Total Units Produced], 0) * 100, 
+		2
+	)
+
+	Good Units Per Hour = 
+	VAR UsableUnits = 
+		SUMX(
+			FactProduction, 
+			FactProduction[UnitsProduced] * (1 - (FactProduction[ScrapRate] / 100))
+		)
+	RETURN
+	DIVIDE(UsableUnits, [Total Production Hours], 0)
+
+	Total Defects = 
+	CALCULATE(
+		SUM(FactProduction[DefectCount]), 
+		USERELATIONSHIP(FactProduction[ProductionDateKey], DimDate[DateKey])
+	)
+
+	Total Production Hours = SUM(FactProduction[ProductionTimeHours])
+
+	Total Units Produced = 
+	CALCULATE(
+		SUM(FactProduction[UnitsProduced]), 
+		USERELATIONSHIP(FactProduction[ProductionDateKey], DimDate[DateKey])
+	)
+
+	Units Per Production Hour = 
+	VAR TotalHours = CALCULATE(SUM(FactProduction[ProductionTimeHours]), USERELATIONSHIP(FactProduction[ProductionDateKey], DimDate[DateKey]))
+	RETURN
+	DIVIDE([Total Units Produced], TotalHours, 0)
+
+	Yield % = 
+	ROUND(
+		100 - AVERAGE(FactProduction[ScrapRate]), 
+		2
+	)
+
+
+_MeasuresPromotions:
+	Avg Promotion ROI = 
+	CALCULATE(
+		AVERAGE(FactPromotionResponse[PromotionROI]),
+		USERELATIONSHIP(FactPromotionResponse[PromotionDateKey], DimDate[DateKey])
+	)
+
+	Avg Uptake % = 
+	CALCULATE(
+		AVERAGE(FactPromotionResponse[CustomerUptakeRate]),
+		USERELATIONSHIP(FactPromotionResponse[PromotionDateKey], DimDate[DateKey])
+	)
+
+	Total Promotion Sales = SUM(FactPromotionResponse[SalesDuringCampaign])
+
+
+_MeasuresPurchases:
+	Cost Saving % = 
+	ROUND(
+		DIVIDE([Cost Savings from Discounts], [Total Purchase Amount], 0) * 100, 
+		2
+	)
+
+	Cost Savings from Discounts = SUM(FactPurchases[DiscountAmount])
+
+	Effective Unit Cost = 
+	ROUND(
+		DIVIDE([Net Purchase Amount], [Total Purchase Quantity], 0), 
+		4
+	)
+
+	Net Purchase Amount = [Total Purchase Amount] - [Cost Savings from Discounts]
+
+	Total Purchase Amount = 
+	CALCULATE(
+		SUM(FactPurchases[PurchaseAmount]), 
+		USERELATIONSHIP(FactPurchases[PurchaseDateKey], 'DimDate'[DateKey])
+	)
+
+	Total Purchase Quantity = SUM(FactPurchases[PurchaseQuantity])
+
+
+_MeasuresReturns:
+	Net Refund % = DIVIDE([Net Refund Amount], [Total Refund Amount], 0)
+
+	Net Refund Amount = [Total Refund Amount] - [Total Restocking Fees]
+
+	Return Rate % = 
+	VAR ReturnedQty = [Total Returned Quantity]
+	VAR SoldQty = [Total Units Sold]
+	RETURN
+	DIVIDE(ReturnedQty, SoldQty, 0)
+
+	Total Refund Amount = 
+	CALCULATE(
+		SUM(FactReturns[RefundAmount]), 
+		USERELATIONSHIP(FactReturns[ReturnDateKey], 'DimDate'[DateKey])
+	)
+
+	Total Restocking Fees = SUM(FactReturns[RestockingFee])
+
+	Total Returned Quantity = 
+	CALCULATE(
+		SUM(FactReturns[ReturnedQuantity]),
+		USERELATIONSHIP(FactReturns[ReturnDateKey], DimDate[DateKey])
+	)
+
+
+_MeasuresRevenue:
+	Avg Margin % = DIVIDE([Gross Profit], [Net Revenue], 0)
+
+	Avg Order Value = DIVIDE([Net Revenue], [Total Transactions], 0)
+
+	Avg Unit Price = DIVIDE([Net Revenue], [Total Units Sold], 0)
+
+	Below-Average Products = 
+	VAR CompanyAvg = [Profit Margin %]
+	RETURN
+	COUNTROWS(
+		FILTER(
+			VALUES(DimProduct[ProductKey]),
+			[Profit Margin %] < CompanyAvg
+		)
+	)
+
+	Cumulative Revenue % = 
+	VAR TotalRev = CALCULATE([Net Revenue], ALLSELECTED(DimProduct))
+	VAR CurrentRev = [Net Revenue]
+	VAR SummarizedTable = 
+		SUMMARIZE(
+			ALLSELECTED(DimProduct), 
+			DimProduct[ProductName], 
+			"Revenue", [Net Revenue]
+		)
+	VAR RunningTotal = 
+		SUMX(
+			FILTER(SummarizedTable, [Revenue] >= CurrentRev), 
+			[Revenue]
+		)
+	RETURN 
+	DIVIDE(RunningTotal, TotalRev, 0)
+
+	Discount % = DIVIDE([Total Discount Amount], [Total Revenue], 0)
+
+	Gross Profit = 
+	[Net Revenue] - CALCULATE(
+		SUMX(FactSales, FactSales[QuantitySold] * RELATED(DimProduct[Cost])),
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	MoM Growth % = 
+	VAR CurrentRevenue = [Net Revenue]
+	VAR PriorMonthRevenue = 
+		CALCULATE(
+			[Net Revenue], 
+			DATEADD('DimDate'[FullDate], -1, MONTH),
+			USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+		)
+	RETURN 
+		DIVIDE(CurrentRevenue - PriorMonthRevenue, PriorMonthRevenue, 0)
+
+	Net Revenue = 
+	CALCULATE(
+		SUM(FactSales[SalesRevenue]) - SUM(FactSales[DiscountAmount]),
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	Profit Margin % = DIVIDE([Gross Profit], [Net Revenue], 0)
+
+	Revenue Volatility = 
+	CALCULATE(
+		STDEVX.P(VALUES(DimDate[FullDate]), [Net Revenue]),
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	SKUs = DISTINCTCOUNT(DimProduct[ProductKey])
+
+	Top Product Revenue = MAXX(VALUES(DimProduct[ProductName]), [Net Revenue])
+
+	Total Discount Amount = 
+	CALCULATE(
+		SUM(FactSales[DiscountAmount]), 
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	Total Revenue = CALCULATE(
+		SUM(FactSales[SalesRevenue]), 
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+	Total Transactions = COUNTROWS(FactSales)
+
+	Total Units Sold = SUM(FactSales[QuantitySold])
+
+	Trend Status = IF([MoM Growth %] > 0, "Improving", "Declining")
+
+	Unique Customers Count = DISTINCTCOUNT(FactSales[CustomerKey])
+
+	Unit Price = 
+	ROUND(
+		DIVIDE([Net Revenue], [Total Units Sold], 0), 
+		2
+	)
+
+	YoY Revenue Growth % = 
+	VAR CurrentRevenue = [Net Revenue]
+	VAR PriorYearRevenue = 
+		CALCULATE(
+			[Net Revenue], 
+			SAMEPERIODLASTYEAR('DimDate'[FullDate])
+		)
+	VAR RevenueDiff = ROUND(CurrentRevenue - PriorYearRevenue, 2) 
+	RETURN 
+		DIVIDE(RevenueDiff, PriorYearRevenue, 0)
+
+	YTD Profit = CALCULATE([Gross Profit], DATESYTD('DimDate'[FullDate]))
+
+	YTD Revenue = CALCULATE([Net Revenue], DATESYTD('DimDate'[FullDate]))
+
+
+_MeasuresStore:
+	Avg Sales/Store = DIVIDE([Net Revenue], [Total Stores], 0)
+
+	Sales Per SqFt = 
+	DIVIDE(
+		[Net Revenue], 
+		SUM(DimStore[SquareFootage]), 
+		0
+	)
+
+	Sales Per Store = DIVIDE([Net Revenue], [Total Stores Active], 0)
+
+	Total Stores = DISTINCTCOUNT(DimStore[StoreKey])
+
+	Total Stores Active = DISTINCTCOUNT(FactSales[StoreKey])
+
+
+
+Calculated Columns:
+DimCustomer:
+	Churn Category = 
+	VAR CustomerLastDate = [Last Purchase Date]
+	VAR DaysSinceLastPurchase = DATEDIFF(CustomerLastDate, TODAY(), DAY)
+	RETURN
+		SWITCH(
+			TRUE(),
+			ISBLANK(CustomerLastDate), "Inactive",
+			DaysSinceLastPurchase <= 30, "Active",
+			DaysSinceLastPurchase <= 90, "At Risk",
+			"Churned"
+		)
+
+	Total LTV = 
+	CALCULATE(
+		SUM(FactSales[SalesRevenue]) - SUM(FactSales[DiscountAmount]),
+		ALLEXCEPT(DimCustomer, DimCustomer[CustomerKey]),
+		USERELATIONSHIP(FactSales[SalesDateKey], DimDate[DateKey])
+	)
+
+
+FactCustomerFeedback:
+	Resolution Speed = 
+	SWITCH(
+		TRUE(),
+		FactCustomerFeedback[ResolutionTimeHours] <= 24, "Very Fast",
+		FactCustomerFeedback[ResolutionTimeHours] <= 72, "Fast",
+		FactCustomerFeedback[ResolutionTimeHours] <= 168, "Moderate",
+		"Slow"
+	)
+
+	Satisfaction Level = 
+	SWITCH(
+		TRUE(),
+		FactCustomerFeedback[FeedbackScore] >= 4.5, "Excellent",
+		FactCustomerFeedback[FeedbackScore] >= 3.5, "Good",
+		FactCustomerFeedback[FeedbackScore] >= 2.5, "Fair",
+		"Poor"
+	)
+
+
+FactFinance:
+	Credit Risk Level = 
+	SWITCH(
+		TRUE(),
+		FactFinance[CreditUsage] >= 90, "Critical",
+		FactFinance[CreditUsage] >= 75, "High",
+		FactFinance[CreditUsage] >= 50, "Medium",
+		"Low"
+	)
+
+	Payment Status = 
+	SWITCH(
+		TRUE(),
+		FactFinance[PaymentDelayDays] = 0, "On Time",
+		FactFinance[PaymentDelayDays] <= 10, "Slightly Late",
+		FactFinance[PaymentDelayDays] <= 30, "Late",
+		"Very Late"
+	)
+
+
+FactInventory:
+	Aging Category = 
+	SWITCH(
+		TRUE(),
+		FactInventory[StockAgingDays] <= 30, "Fresh (0-30)",
+		FactInventory[StockAgingDays] <= 90, "Aged (31-90)",
+		FactInventory[StockAgingDays] <= 180, "Very Aged (91-180)",
+		"Obsolete (180+)"
+	)
+
+	Stock Status = 
+	SWITCH(
+		TRUE(),
+		FactInventory[QuantityOnHand] <= FactInventory[ReorderLevel], "Critical",
+		FactInventory[QuantityOnHand] <= FactInventory[SafetyStock], "Low",
+		FactInventory[QuantityOnHand] >= (FactInventory[ReorderLevel] * 3), "Overstock",
+		"Normal"
+	)
+
+
+FactPromotionResponse:
+	ROI Category = 
+	SWITCH(
+		TRUE(),
+		FactPromotionResponse[PromotionROI] > 300, "Excellent",
+		FactPromotionResponse[PromotionROI] > 150, "Good",
+		FactPromotionResponse[PromotionROI] > 0, "Positive",
+		"Negative"
+	)

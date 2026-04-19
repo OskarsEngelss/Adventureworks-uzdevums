@@ -36,8 +36,8 @@ def update_aggregates_daily_inventory():
 
             print(f"Aggregating inventory for date: {target_date}")
 
-            # 2. IDEMPOTENT DELETE (Prevents duplicates on re-run)
-            starrocks_hook.run(f"DELETE FROM agg_daily_inventory WHERE InventoryDateKey = '{target_date}';")
+            # 2. IDEMPOTENT DELETE (Pēdiņas noņemtas, jo tips ir BIGINT)
+            starrocks_hook.run(f"DELETE FROM agg_daily_inventory WHERE InventoryDateKey = {target_date};")
 
             # 3. INSERT ROLLUP
             load_sql = f"""
@@ -65,7 +65,7 @@ def update_aggregates_daily_inventory():
                 LEFT JOIN DimProductCategory dpc ON TRIM(dp.Category) = TRIM(dpc.CategoryName)
                 LEFT JOIN DimAgingTier dat ON fi.StockAgingDays >= dat.MinAgingDays 
                                           AND fi.StockAgingDays <= dat.MaxAgingDays
-                WHERE fi.InventoryDateKey = '{target_date}'
+                WHERE fi.InventoryDateKey = {target_date} -- Pēdiņas noņemtas
                 GROUP BY 1, 2, 3, 4;
             """
             starrocks_hook.run(load_sql)
@@ -74,12 +74,13 @@ def update_aggregates_daily_inventory():
         except Exception as e:
             # Log the error to your dedicated error table
             error_msg = str(e).replace("'", '"')
-            log_date = target_date if target_date else datetime.date.today()
+            # Ja target_date nav atrasts, izmantojam šodienu formātā YYYYMMDD
+            log_date = target_date if target_date else int(datetime.date.today().strftime('%Y%m%d'))
             
             starrocks_hook.run(f"""
                 INSERT INTO adventureworks_errors.agg_daily_inventory_errors 
                 (InventoryDateKey, FailureReason, FailedAt) 
-                VALUES ('{log_date}', 'Inventory Agg Failure: {error_msg[:200]}', NOW())
+                VALUES ({log_date}, 'Inventory Agg Failure: {error_msg[:200]}', NOW())
             """)
             raise
 

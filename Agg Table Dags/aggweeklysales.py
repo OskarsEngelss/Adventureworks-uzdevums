@@ -31,12 +31,15 @@ def update_aggregates_weekly_sales():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         
         try:
-            # 1. FIND THE LATEST MONDAY
-            # We calculate the Monday for the most recent sales date
+            # 1. FIND THE LATEST MONDAY (Aprēķinām pirmdienu kā BIGINT YYYYMMDD)
             date_query = """
-                SELECT MAX(DATE_SUB(d.FullDate, INTERVAL (d.DayOfWeek - 1) DAY)) 
-                FROM FactSales fs
-                JOIN DimDate d ON fs.SalesDateKey = d.DateKey;
+                SELECT MAX(
+                    CAST(DATE_FORMAT(
+                        DATE_SUB(STR_TO_DATE(CAST(SalesDateKey AS CHAR), '%Y%m%d'), 
+                        INTERVAL (DAYOFWEEK(STR_TO_DATE(CAST(SalesDateKey AS CHAR), '%Y%m%d')) - 1) DAY), 
+                    '%Y%m%d') AS BIGINT)
+                ) 
+                FROM FactSales;
             """
             res = starrocks_hook.get_first(date_query)
             target_week = res[0]
@@ -46,8 +49,8 @@ def update_aggregates_weekly_sales():
 
             print(f"Processing week starting: {target_week}")
 
-            # 2. DELETE OLD DATA
-            starrocks_hook.run(f"DELETE FROM agg_weekly_sales WHERE WeekStartDateKey = '{target_week}';")
+            # 2. DELETE OLD DATA (Pēdiņas noņemtas)
+            starrocks_hook.run(f"DELETE FROM agg_weekly_sales WHERE WeekStartDateKey = {target_week};")
 
             # 3. INSERT WEEKLY ROLLUP
             load_sql = f"""
@@ -56,7 +59,10 @@ def update_aggregates_weekly_sales():
                     SumRevenue, AvgRevenue, MinRevenue, MaxRevenue
                 )
                 SELECT 
-                    DATE_SUB(d.FullDate, INTERVAL (d.DayOfWeek - 1) DAY) as WeekStart,
+                    CAST(DATE_FORMAT(
+                        DATE_SUB(STR_TO_DATE(CAST(fs.SalesDateKey AS CHAR), '%Y%m%d'), 
+                        INTERVAL (DAYOFWEEK(STR_TO_DATE(CAST(fs.SalesDateKey AS CHAR), '%Y%m%d')) - 1) DAY), 
+                    '%Y%m%d') AS BIGINT) as WeekStart,
                     fs.StoreKey,
                     dpc.ProductCategoryKey,
                     SUM(fs.SalesRevenue),
@@ -64,10 +70,12 @@ def update_aggregates_weekly_sales():
                     MIN(fs.SalesRevenue),
                     MAX(fs.SalesRevenue)
                 FROM FactSales fs
-                JOIN DimDate d ON fs.SalesDateKey = d.DateKey
                 JOIN DimProduct dp ON fs.ProductKey = dp.ProductKey
                 JOIN DimProductCategory dpc ON TRIM(dp.Category) = TRIM(dpc.CategoryName)
-                WHERE DATE_SUB(d.FullDate, INTERVAL (d.DayOfWeek - 1) DAY) = '{target_week}'
+                WHERE CAST(DATE_FORMAT(
+                        DATE_SUB(STR_TO_DATE(CAST(fs.SalesDateKey AS CHAR), '%Y%m%d'), 
+                        INTERVAL (DAYOFWEEK(STR_TO_DATE(CAST(fs.SalesDateKey AS CHAR), '%Y%m%d')) - 1) DAY), 
+                    '%Y%m%d') AS BIGINT) = {target_week}
                 GROUP BY 1, 2, 3;
             """
             starrocks_hook.run(load_sql)
@@ -75,10 +83,12 @@ def update_aggregates_weekly_sales():
         except Exception as e:
             # Capture error in your new error table
             error_msg = str(e).replace("'", '"')
+            # Nodrošinām skaitlisku vērtību kļūdu tabulai
+            err_week = target_week if 'target_week' in locals() and target_week else 19000101
             starrocks_hook.run(f"""
                 INSERT INTO adventureworks_errors.agg_weekly_sales_errors 
                 (WeekStartDateKey, FailureReason, FailedAt, SQLState) 
-                VALUES (CURRENT_DATE(), 'Logic Error: {error_msg[:200]}', NOW(), '1064')
+                VALUES ({err_week}, 'Logic Error: {error_msg[:200]}', NOW(), '1064')
             """)
             raise
 

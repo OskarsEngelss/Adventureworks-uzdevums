@@ -23,11 +23,10 @@ def update_aggregates_monthly_sales():
         starrocks_hook = MySqlHook(mysql_conn_id=STARROCKS_CONNECTION_ID)
         
         try:
-            # 1. FIND THE LATEST MONTH (e.g., '2014-06-01')
+            # 1. FIND THE LATEST MONTH (Izmantojam BIGINT matemātiku, lai iegūtu YYYYMM01)
             date_query = """
-                SELECT DATE_TRUNC('month', MAX(d.FullDate))
-                FROM FactSales fs
-                JOIN DimDate d ON fs.SalesDateKey = d.DateKey;
+                SELECT MAX(SalesDateKey / 100 * 100 + 1)
+                FROM FactSales;
             """
             res = starrocks_hook.get_first(date_query)
             target_month = res[0]
@@ -38,25 +37,23 @@ def update_aggregates_monthly_sales():
 
             print(f"Aggregating data for month starting: {target_month}")
 
-            # 2. CLEAN UP OLD DATA (To prevent duplicates if we re-run)
-            starrocks_hook.run(f"DELETE FROM agg_monthly_sales WHERE MonthStartDateKey = '{target_month}';")
+            # 2. CLEAN UP OLD DATA (Pēdiņas noņemtas)
+            starrocks_hook.run(f"DELETE FROM agg_monthly_sales WHERE MonthStartDateKey = {target_month};")
 
             # 3. INSERT CLEAN ROLLUP
-            # We use a Subquery for DimCustomer to ensure we only get ONE segment per customer
             load_sql = f"""
                 INSERT INTO agg_monthly_sales (
                     MonthStartDateKey, CustomerSegmentKey, RegionKey, 
                     TotalRevenue, AvgOrderValue, DistinctCustomerCount
                 )
                 SELECT 
-                    DATE_TRUNC('month', d.FullDate),
+                    (fs.SalesDateKey / 100 * 100 + 1),
                     COALESCE(dcs.SegmentKey, 0),
                     fs.StoreKey,
                     SUM(fs.SalesRevenue),
                     AVG(fs.SalesRevenue),
                     COUNT(DISTINCT fs.CustomerKey)
                 FROM FactSales fs
-                JOIN DimDate d ON fs.SalesDateKey = d.DateKey
                 LEFT JOIN (
                     -- This subquery ensures we only get 1 row per customer
                     SELECT DISTINCT CustomerKey, CustomerSegment 
@@ -64,7 +61,7 @@ def update_aggregates_monthly_sales():
                     WHERE IsCurrent = TRUE
                 ) dc ON fs.CustomerKey = dc.CustomerKey
                 LEFT JOIN DimCustomerSegment dcs ON dc.CustomerSegment = dcs.SegmentName
-                WHERE DATE_TRUNC('month', d.FullDate) = '{target_month}'
+                WHERE (fs.SalesDateKey / 100 * 100 + 1) = {target_month}
                 GROUP BY 1, 2, 3;
             """
             starrocks_hook.run(load_sql)
@@ -73,10 +70,12 @@ def update_aggregates_monthly_sales():
         except Exception as e:
             # Log the error to your dedicated error table
             error_msg = str(e).replace("'", '"')
+            # Ja target_month nav, izmantojam CURRENT_DATE formātā YYYYMMDD
+            err_month = target_month if target_month else int(datetime.date.today().strftime('%Y%m01'))
             starrocks_hook.run(f"""
                 INSERT INTO adventureworks_errors.agg_monthly_sales_errors 
                 (MonthStartDateKey, FailureReason, FailedAt) 
-                VALUES (CURRENT_DATE(), 'Monthly Aggregate Failure: {error_msg[:200]}', NOW())
+                VALUES ({err_month}, 'Monthly Aggregate Failure: {error_msg[:200]}', NOW())
             """)
             raise
 

@@ -25,12 +25,13 @@ def update_aggregates_daily_sales():
         try:
             # 1. SMART DATE LOOKUP
             df = starrocks_hook.get_first("SELECT MAX(SalesDateKey) FROM FactSales;")
-            target_date = df[0] if df[0] else '2026-01-19'
+            # Noklusējuma vērtība nomainīta uz BIGINT (bez pēdiņām)
+            target_date = df[0] if df[0] else 20260119 
             
             print(f"Detected latest sales data on: {target_date}. Processing aggregates...")
 
-            # 2. DELETE (Idempotency)
-            starrocks_hook.run(f"DELETE FROM agg_daily_sales WHERE SalesDateKey = '{target_date}';")
+            # 2. DELETE (Pēdiņas noņemtas)
+            starrocks_hook.run(f"DELETE FROM agg_daily_sales WHERE SalesDateKey = {target_date};")
 
             # 3. INSERT
             quarantine_sql = f"""
@@ -49,17 +50,18 @@ def update_aggregates_daily_sales():
                 FROM FactSales fs
                 INNER JOIN DimProduct dp ON fs.ProductKey = dp.ProductKey AND dp.IsCurrent = TRUE
                 INNER JOIN DimProductCategory dpc ON dp.Category = dpc.CategoryName
-                WHERE fs.SalesDateKey = '{target_date}'
+                WHERE fs.SalesDateKey = {target_date} -- Pēdiņas noņemtas
                 GROUP BY fs.SalesDateKey, fs.StoreKey, dpc.ProductCategoryKey;
             """
             starrocks_hook.run(quarantine_sql)
             
         except Exception as e:
             error_msg = str(e).replace("'", '"')
+            # Pēdiņas noņemtas arī kļūdu žurnāla ierakstā
             starrocks_hook.run(f"""
                 INSERT INTO adventureworks_errors.agg_daily_sales_errors 
                 (SalesDateKey, FailureReason, FailedAt) 
-                VALUES ('{target_date}', 'Daily Sales Agg Failure: {error_msg[:200]}', NOW())
+                VALUES ({target_date}, 'Daily Sales Agg Failure: {error_msg[:200]}', NOW())
             """)
             raise
         
